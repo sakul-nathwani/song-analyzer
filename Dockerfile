@@ -20,9 +20,13 @@ RUN npm --prefix frontend ci
 COPY frontend/ ./frontend/
 RUN npm --prefix frontend run build
 
-# Copy backend source
+# Copy backend source and startup script
 COPY backend/ ./backend/
+COPY start.sh ./start.sh
+RUN chmod +x start.sh
 
 EXPOSE 8000
 
-CMD uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}
+# Use shell script so $PORT is always expanded by sh, whether Railway
+# injects it via the Dockerfile CMD or via its startCommand override.
+CMD ["sh", "start.sh"]
