@@ -1,0 +1,7 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+librosa>=0.10.0
+numpy>=1.24.0
+anthropic>=0.40.0
+soundfile>=0.12.1

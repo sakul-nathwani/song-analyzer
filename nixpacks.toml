@@ -1,0 +1,17 @@
+# Nixpacks build config — tells Railway to provision both Python and Node
+# so it can install Python deps AND build the React frontend in one container.
+
+[phases.setup]
+nixPkgs = ["python312", "nodejs_20"]
+
+[phases.install]
+cmds = [
+  "pip install -r backend/requirements.txt",
+  "npm --prefix frontend ci"
+]
+
+[phases.build]
+cmds = ["npm --prefix frontend run build"]
+
+[start]
+cmd = "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"

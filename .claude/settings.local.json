@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Read(//opt/homebrew/bin/**)",
+      "Read(//usr/local/bin/**)",
+      "Bash(command -v node)",
+      "Read(//Users/SakulNathwani/**)",
+      "Read(//opt/homebrew/opt/**)",
+      "Bash(export PATH=\"/opt/homebrew/bin:$PATH\")",
+      "Bash(/opt/homebrew/bin/npm install:*)",
+      "Bash(python3 -c \"import librosa, anthropic, fastapi, uvicorn, numpy; print\\(''All backend deps OK''\\)\")",
+      "Bash(python3 -c \"import librosa\")",
+      "Bash(chmod:*)"
+    ]
+  }
+}
