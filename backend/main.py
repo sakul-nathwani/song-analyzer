@@ -1,13 +1,14 @@
 import os
+import time
+import uuid
 import tempfile
 import numpy as np
 import librosa
 import anthropic
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-import json
 
 app = FastAPI()
 
@@ -115,7 +116,11 @@ def detect_sections(y, sr):
 
 
 def analyze_audio(file_path: str) -> dict:
-    y, sr = librosa.load(file_path, sr=None, mono=True)
+    # Resample to 22050 Hz mono — librosa's native rate and sufficient for
+    # every feature we compute. Halves the array vs 44100 Hz WAV files,
+    # cutting STFT/chroma/MFCC/beat-track time by ~50-60%.
+    # Cap at 6 minutes so unusually long files can't time out on Railway.
+    y, sr = librosa.load(file_path, sr=22050, mono=True, duration=360)
     duration = librosa.get_duration(y=y, sr=sr)
 
     # Tempo & BPM
@@ -267,75 +272,117 @@ Be direct, technical, and specific. Use actual numbers from the analyses when ma
 """
 
 
+# ── Job store ─────────────────────────────────────────────────────────────
+# Each job: {status, stage, created_at, result, error}
+# status: "running" | "done" | "error"
+# stage:  "extracting" | "generating" | "done"
+_jobs: dict = {}
+_JOB_TTL = 1800  # 30 minutes
+
+
+def _cleanup_old_jobs() -> None:
+    cutoff = time.time() - _JOB_TTL
+    stale = [jid for jid, j in _jobs.items() if j["created_at"] < cutoff]
+    for jid in stale:
+        del _jobs[jid]
+
+
+def _run_analysis(job_id: str, ref_path: str, wip_path: str) -> None:
+    """Blocking worker — FastAPI runs sync BackgroundTasks in a thread pool."""
+    try:
+        _jobs[job_id]["stage"] = "extracting"
+        ref_analysis = analyze_audio(ref_path)
+        wip_analysis = analyze_audio(wip_path)
+
+        _jobs[job_id]["stage"] = "generating"
+        prompt = build_comparison_prompt(ref_analysis, wip_analysis)
+
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        suggestions = next(b.text for b in response.content if b.type == "text")
+
+        _jobs[job_id].update({
+            "status": "done",
+            "stage": "done",
+            "result": {
+                "reference": ref_analysis,
+                "wip": wip_analysis,
+                "suggestions": suggestions,
+            },
+        })
+
+    except Exception as exc:
+        _jobs[job_id].update({"status": "error", "error": str(exc)})
+
+    finally:
+        for path in [ref_path, wip_path]:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+# ── Endpoints ──────────────────────────────────────────────────────────────
+
 @app.post("/analyze")
 async def analyze(
+    background_tasks: BackgroundTasks,
     reference: UploadFile = File(...),
     wip: UploadFile = File(...),
 ):
-    # Validate file types
-    allowed_types = {"audio/mpeg", "audio/wav", "audio/x-wav", "audio/flac", "audio/ogg", "audio/aiff", "audio/x-aiff"}
     allowed_extensions = {".mp3", ".wav", ".flac", ".ogg", ".aiff", ".aif", ".m4a"}
-
     for upload in [reference, wip]:
         ext = os.path.splitext(upload.filename or "")[1].lower()
         if ext not in allowed_extensions:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported file type: {upload.filename}. Supported: MP3, WAV, FLAC, OGG, AIFF, M4A"
+                detail=f"Unsupported file type: {upload.filename}. Supported: MP3, WAV, FLAC, OGG, AIFF, M4A",
             )
 
-    # Stream uploads to temp files in 1 MB chunks — avoids buffering 50 MB+
-    # files entirely in memory and keeps the connection alive during the upload.
+    # Stream uploads to temp files in 1 MB chunks before returning so the
+    # background task has the data even after the request body is gone.
     async def _stream_to_tmp(upload: UploadFile, suffix: str) -> str:
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             path = tmp.name
-            while True:
-                chunk = await upload.read(1024 * 1024)
-                if not chunk:
-                    break
+            while chunk := await upload.read(1024 * 1024):
                 tmp.write(chunk)
         return path
 
-    ref_path = await _stream_to_tmp(
-        reference, os.path.splitext(reference.filename or ".wav")[1]
-    )
-    wip_path = await _stream_to_tmp(
-        wip, os.path.splitext(wip.filename or ".wav")[1]
-    )
+    ref_path = await _stream_to_tmp(reference, os.path.splitext(reference.filename or ".wav")[1])
+    wip_path = await _stream_to_tmp(wip, os.path.splitext(wip.filename or ".wav")[1])
 
-    try:
-        # Analyze both files
-        ref_analysis = analyze_audio(ref_path)
-        wip_analysis = analyze_audio(wip_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Audio analysis failed: {str(e)}")
-    finally:
-        os.unlink(ref_path)
-        os.unlink(wip_path)
+    _cleanup_old_jobs()
+    job_id = uuid.uuid4().hex
+    _jobs[job_id] = {
+        "status": "running",
+        "stage": "extracting",
+        "created_at": time.time(),
+        "result": None,
+        "error": None,
+    }
 
-    # Build prompt and stream Claude response
-    prompt = build_comparison_prompt(ref_analysis, wip_analysis)
+    # Add as a sync function — FastAPI runs it in a thread pool so the
+    # event loop is never blocked by librosa or the Claude API call.
+    background_tasks.add_task(_run_analysis, job_id, ref_path, wip_path)
 
-    def generate():
-        try:
-            yield f"data: {json.dumps({'type': 'analysis', 'reference': ref_analysis, 'wip': wip_analysis})}\n\n"
+    return {"job_id": job_id}
 
-            client = anthropic.Anthropic()
-            with client.messages.stream(
-                model="claude-opus-4-6",
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}],
-            ) as stream:
-                for text in stream.text_stream:
-                    yield f"data: {json.dumps({'type': 'text', 'content': text})}\n\n"
 
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
-        except Exception as e:
-            # Emit the error over the stream so the frontend can display it
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
+@app.get("/status/{job_id}")
+def get_status(job_id: str):
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    return {
+        "status": job["status"],   # "running" | "done" | "error"
+        "stage":  job["stage"],    # "extracting" | "generating" | "done"
+        "result": job["result"],
+        "error":  job["error"],
+    }
 
 
 # ── Static file serving (production) ──────────────────────────────────────

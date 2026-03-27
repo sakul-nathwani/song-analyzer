@@ -195,13 +195,16 @@ function ProgressSteps({ stage }) {
 export default function App() {
   const [refFile, setRefFile] = useState(null);
   const [wipFile, setWipFile] = useState(null);
-  const [stage, setStage] = useState("idle");
+  const [stage, setStageState] = useState("idle");
+  const setStage = (s) => { stageRef.current = s; setStageState(s); };
   const [suggestions, setSuggestions] = useState("");
   const [refAnalysis, setRefAnalysis] = useState(null);
   const [wipAnalysis, setWipAnalysis] = useState(null);
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef(null);
+  const pollRef = useRef(null);
+  const stageRef = useRef("idle");
 
   const isAnalyzing = stage === "uploading" || stage === "extracting" || stage === "generating";
 
@@ -214,6 +217,10 @@ export default function App() {
     }
     return () => clearInterval(timerRef.current);
   }, [isAnalyzing]);
+
+  useEffect(() => {
+    return () => clearInterval(pollRef.current);
+  }, []);
 
   const handleAnalyze = async () => {
     if (!refFile || !wipFile) return;
@@ -235,7 +242,6 @@ export default function App() {
       });
 
       if (!res.ok) {
-        // Gracefully handle non-JSON error bodies (e.g. Railway 502 HTML pages)
         let msg = `Server error ${res.status}`;
         try {
           const body = await res.json();
@@ -246,47 +252,40 @@ export default function App() {
         throw new Error(msg);
       }
 
+      const { job_id } = await res.json();
       setStage("extracting");
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop();
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const raw = line.slice(6).trim();
-          if (!raw) continue;
-
-          try {
-            const msg = JSON.parse(raw);
-            if (msg.type === "analysis") {
-              setRefAnalysis(msg.reference);
-              setWipAnalysis(msg.wip);
-              setStage("generating");
-            } else if (msg.type === "text") {
-              setSuggestions((prev) => prev + msg.content);
-            } else if (msg.type === "done") {
-              setStage("done");
-            } else if (msg.type === "error") {
-              throw new Error(msg.message || "Analysis failed on server");
-            }
-          } catch (parseErr) {
-            if (parseErr.message !== parseErr.message) return; // re-throw real errors
-            if (parseErr instanceof SyntaxError) continue; // partial SSE chunk
-            throw parseErr;
+      clearInterval(pollRef.current);
+      pollRef.current = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`/status/${job_id}`);
+          if (!statusRes.ok) {
+            let msg = `Status check failed (${statusRes.status})`;
+            try { const b = await statusRes.json(); msg = b.detail || msg; } catch {}
+            throw new Error(msg);
           }
-        }
-      }
+          const data = await statusRes.json();
 
-      if (stage !== "done") setStage("done");
+          if (data.stage === "generating" && stageRef.current !== "generating") {
+            setStage("generating");
+          }
+
+          if (data.status === "done") {
+            clearInterval(pollRef.current);
+            setRefAnalysis(data.result.reference);
+            setWipAnalysis(data.result.wip);
+            setSuggestions(data.result.suggestions);
+            setStage("done");
+          } else if (data.status === "error") {
+            clearInterval(pollRef.current);
+            throw new Error(data.error || "Analysis failed on server");
+          }
+        } catch (pollErr) {
+          clearInterval(pollRef.current);
+          setError(pollErr.message);
+          setStage("error");
+        }
+      }, 3000);
     } catch (err) {
       setError(err.message);
       setStage("error");
@@ -324,7 +323,7 @@ export default function App() {
           <div className="upload-grid">
             <AudioUploadBox
               label="Reference Track"
-              sublabel="The song you're aiming for"
+              sublabel="The song you're aiming for · first 6 min analysed"
               file={refFile}
               onFileChange={setRefFile}
               color="#6c63ff"
@@ -333,7 +332,7 @@ export default function App() {
             <div className="upload-vs">VS</div>
             <AudioUploadBox
               label="Your WIP"
-              sublabel="Your work-in-progress"
+              sublabel="Your work-in-progress · first 6 min analysed"
               file={wipFile}
               onFileChange={setWipFile}
               color="#ff6584"
