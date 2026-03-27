@@ -284,14 +284,24 @@ async def analyze(
                 detail=f"Unsupported file type: {upload.filename}. Supported: MP3, WAV, FLAC, OGG, AIFF, M4A"
             )
 
-    # Save uploads to temp files
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(reference.filename or ".wav")[1]) as ref_tmp:
-        ref_tmp.write(await reference.read())
-        ref_path = ref_tmp.name
+    # Stream uploads to temp files in 1 MB chunks — avoids buffering 50 MB+
+    # files entirely in memory and keeps the connection alive during the upload.
+    async def _stream_to_tmp(upload: UploadFile, suffix: str) -> str:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            path = tmp.name
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                tmp.write(chunk)
+        return path
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(wip.filename or ".wav")[1]) as wip_tmp:
-        wip_tmp.write(await wip.read())
-        wip_path = wip_tmp.name
+    ref_path = await _stream_to_tmp(
+        reference, os.path.splitext(reference.filename or ".wav")[1]
+    )
+    wip_path = await _stream_to_tmp(
+        wip, os.path.splitext(wip.filename or ".wav")[1]
+    )
 
     try:
         # Analyze both files
@@ -307,26 +317,23 @@ async def analyze(
     prompt = build_comparison_prompt(ref_analysis, wip_analysis)
 
     def generate():
-        # First, send the analysis data
-        analysis_payload = json.dumps({
-            "type": "analysis",
-            "reference": ref_analysis,
-            "wip": wip_analysis,
-        })
-        yield f"data: {analysis_payload}\n\n"
+        try:
+            yield f"data: {json.dumps({'type': 'analysis', 'reference': ref_analysis, 'wip': wip_analysis})}\n\n"
 
-        # Then stream Claude suggestions
-        client = anthropic.Anthropic()
-        with client.messages.stream(
-            model="claude-opus-4-6",
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
-        ) as stream:
-            for text in stream.text_stream:
-                payload = json.dumps({"type": "text", "content": text})
-                yield f"data: {payload}\n\n"
+            client = anthropic.Anthropic()
+            with client.messages.stream(
+                model="claude-opus-4-6",
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                for text in stream.text_stream:
+                    yield f"data: {json.dumps({'type': 'text', 'content': text})}\n\n"
 
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        except Exception as e:
+            # Emit the error over the stream so the frontend can display it
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 

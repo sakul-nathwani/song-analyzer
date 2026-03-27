@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import "./App.css";
 
@@ -153,19 +153,72 @@ function AnalysisPanel({ analysis, label, color }) {
   );
 }
 
+// stage: idle → uploading → extracting → generating → done | error
+const STAGE_LABELS = {
+  idle:       null,
+  uploading:  "Uploading files...",
+  extracting: "Extracting audio features...",
+  generating: "Generating AI feedback...",
+  done:       null,
+  error:      null,
+};
+
+const STEPS = [
+  { key: "uploading",  label: "Upload" },
+  { key: "extracting", label: "Analyze Audio" },
+  { key: "generating", label: "AI Feedback" },
+];
+
+function ProgressSteps({ stage }) {
+  const order = ["uploading", "extracting", "generating", "done"];
+  const current = order.indexOf(stage);
+  return (
+    <div className="progress-steps">
+      {STEPS.map((step, i) => {
+        const stepIdx = i; // 0=uploading,1=extracting,2=generating
+        const done = current > stepIdx || stage === "done";
+        const active = current === stepIdx && stage !== "done";
+        return (
+          <div key={step.key} className={`step ${done ? "done" : ""} ${active ? "active" : ""}`}>
+            <div className="step-dot">
+              {done ? "✓" : active ? <span className="step-spinner" /> : i + 1}
+            </div>
+            <span className="step-label">{step.label}</span>
+            {i < STEPS.length - 1 && <div className={`step-line ${done ? "done" : ""}`} />}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function App() {
   const [refFile, setRefFile] = useState(null);
   const [wipFile, setWipFile] = useState(null);
-  const [status, setStatus] = useState("idle"); // idle | analyzing | done | error
+  const [stage, setStage] = useState("idle");
   const [suggestions, setSuggestions] = useState("");
   const [refAnalysis, setRefAnalysis] = useState(null);
   const [wipAnalysis, setWipAnalysis] = useState(null);
   const [error, setError] = useState("");
+  const [elapsed, setElapsed] = useState(0);
+  const timerRef = useRef(null);
+
+  const isAnalyzing = stage === "uploading" || stage === "extracting" || stage === "generating";
+
+  useEffect(() => {
+    if (isAnalyzing) {
+      setElapsed(0);
+      timerRef.current = setInterval(() => setElapsed((s) => s + 1), 1000);
+    } else {
+      clearInterval(timerRef.current);
+    }
+    return () => clearInterval(timerRef.current);
+  }, [isAnalyzing]);
 
   const handleAnalyze = async () => {
     if (!refFile || !wipFile) return;
 
-    setStatus("analyzing");
+    setStage("uploading");
     setSuggestions("");
     setRefAnalysis(null);
     setWipAnalysis(null);
@@ -182,9 +235,18 @@ export default function App() {
       });
 
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || "Analysis failed");
+        // Gracefully handle non-JSON error bodies (e.g. Railway 502 HTML pages)
+        let msg = `Server error ${res.status}`;
+        try {
+          const body = await res.json();
+          msg = body.detail || msg;
+        } catch {
+          try { msg = (await res.text()).slice(0, 200) || msg; } catch {}
+        }
+        throw new Error(msg);
       }
+
+      setStage("extracting");
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -208,25 +270,30 @@ export default function App() {
             if (msg.type === "analysis") {
               setRefAnalysis(msg.reference);
               setWipAnalysis(msg.wip);
+              setStage("generating");
             } else if (msg.type === "text") {
               setSuggestions((prev) => prev + msg.content);
             } else if (msg.type === "done") {
-              setStatus("done");
+              setStage("done");
+            } else if (msg.type === "error") {
+              throw new Error(msg.message || "Analysis failed on server");
             }
-          } catch {
-            // ignore parse errors on partial chunks
+          } catch (parseErr) {
+            if (parseErr.message !== parseErr.message) return; // re-throw real errors
+            if (parseErr instanceof SyntaxError) continue; // partial SSE chunk
+            throw parseErr;
           }
         }
       }
 
-      setStatus("done");
+      if (stage !== "done") setStage("done");
     } catch (err) {
       setError(err.message);
-      setStatus("error");
+      setStage("error");
     }
   };
 
-  const canAnalyze = refFile && wipFile && status !== "analyzing";
+  const canAnalyze = refFile && wipFile && !isAnalyzing;
 
   const freqLabels = [
     ["Sub-bass", "sub_bass_pct"],
@@ -275,14 +342,14 @@ export default function App() {
           </div>
 
           <button
-            className={`analyze-btn ${canAnalyze ? "active" : ""} ${status === "analyzing" ? "loading" : ""}`}
+            className={`analyze-btn ${canAnalyze ? "active" : ""} ${isAnalyzing ? "loading" : ""}`}
             onClick={handleAnalyze}
             disabled={!canAnalyze}
           >
-            {status === "analyzing" ? (
+            {isAnalyzing ? (
               <>
                 <span className="spinner" />
-                Analyzing...
+                {STAGE_LABELS[stage]}
               </>
             ) : (
               <>
@@ -291,17 +358,26 @@ export default function App() {
               </>
             )}
           </button>
+
+          {isAnalyzing && (
+            <div className="analysis-progress">
+              <ProgressSteps stage={stage} />
+              <div className="elapsed">
+                {elapsed}s elapsed — large files can take 30–60 seconds
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Error */}
-        {status === "error" && (
+        {stage === "error" && (
           <div className="error-box">
             <span className="error-icon">⚠️</span> {error}
           </div>
         )}
 
         {/* Analysis Cards */}
-        {(refAnalysis || wipAnalysis) && (
+        {(refAnalysis || wipAnalysis) && stage !== "uploading" && (
           <section className="results-section">
             <h2 className="section-title">Audio Analysis</h2>
 
@@ -344,11 +420,11 @@ export default function App() {
         )}
 
         {/* AI Suggestions */}
-        {(suggestions || status === "analyzing") && (
+        {(suggestions || stage === "generating") && (
           <section className="suggestions-section">
             <h2 className="section-title">
               AI Production Feedback
-              {status === "analyzing" && suggestions && (
+              {stage === "generating" && suggestions && (
                 <span className="streaming-indicator">
                   <span className="pulse" /> generating...
                 </span>
@@ -362,7 +438,7 @@ export default function App() {
               ) : (
                 <div className="suggestions-placeholder">
                   <span className="spinner large" />
-                  <span>Extracting features and generating feedback...</span>
+                  <span>Waiting for AI feedback...</span>
                 </div>
               )}
             </div>
