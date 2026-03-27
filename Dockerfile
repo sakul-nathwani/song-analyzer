@@ -14,11 +14,15 @@ COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
 # Build the React frontend
+# Copy manifests first so npm ci is cached unless dependencies change
 COPY frontend/package.json frontend/package-lock.json ./frontend/
 RUN npm --prefix frontend ci
 
+# Now copy source (node_modules and dist are excluded via .dockerignore)
 COPY frontend/ ./frontend/
 RUN npm --prefix frontend run build
+# Verify the build produced index.html (catches silent build failures)
+RUN test -f frontend/dist/index.html
 
 # Copy backend source and startup script
 COPY backend/ ./backend/

@@ -339,12 +339,17 @@ _DIST = os.path.abspath(
 )
 
 if os.path.isdir(_DIST):
-    # Serve /assets/* (Vite bundles JS/CSS here)
+    # Serve /assets/* (Vite outputs JS/CSS bundles here)
     _assets = os.path.join(_DIST, "assets")
     if os.path.isdir(_assets):
         app.mount("/assets", StaticFiles(directory=_assets), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
-        """Return index.html for every non-API path so React Router works."""
+        """Serve exact files from dist root (favicon, icons, etc.) and fall
+        back to index.html for everything else so React Router works."""
+        if full_path:
+            candidate = os.path.join(_DIST, full_path)
+            if os.path.isfile(candidate):
+                return FileResponse(candidate)
         return FileResponse(os.path.join(_DIST, "index.html"))
