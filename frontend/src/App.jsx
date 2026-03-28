@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import "./App.css";
 
 // ── Upload box ─────────────────────────────────────────────────────────────
@@ -81,10 +82,10 @@ function FreqBar({ label, refPct, wipPct }) {
       <div className="freq-bar-label">{label}</div>
       <div className="freq-bars">
         <div className="freq-bar-track">
-          <div className="freq-bar ref-bar" style={{ width: `${Math.min(refPct * 4, 100)}%` }} title={`Ref: ${refPct}%`} />
+          <div className="freq-bar ref-bar" style={{ width: `${refPct}%` }} title={`Ref: ${refPct}%`} />
         </div>
         <div className="freq-bar-track">
-          <div className="freq-bar wip-bar" style={{ width: `${Math.min(wipPct * 4, 100)}%` }} title={`WIP: ${wipPct}%`} />
+          <div className="freq-bar wip-bar" style={{ width: `${wipPct}%` }} title={`WIP: ${wipPct}%`} />
         </div>
       </div>
       <div className="freq-bar-values">
@@ -226,10 +227,10 @@ function SectionComparisonPanel({ refAnalysis, wipAnalysis }) {
                         <span className="section-freq-lbl">{FREQ_LABELS[ki]}</span>
                         <div className="freq-bars">
                           <div className="freq-bar-track">
-                            <div className="freq-bar ref-bar" style={{ width: `${Math.min(rv * 4, 100)}%` }} />
+                            <div className="freq-bar ref-bar" style={{ width: `${rv}%` }} />
                           </div>
                           <div className="freq-bar-track">
-                            <div className="freq-bar wip-bar" style={{ width: `${Math.min(wv * 4, 100)}%` }} />
+                            <div className="freq-bar wip-bar" style={{ width: `${wv}%` }} />
                           </div>
                         </div>
                         <div className="freq-bar-values" style={{ minWidth: 70 }}>
@@ -306,7 +307,7 @@ function ChatPanel({ jobId }) {
             <div key={i} className={`chat-message ${m.role}`}>
               <div className="chat-bubble">
                 {m.role === "assistant"
-                  ? <div className="markdown-body"><ReactMarkdown>{m.content}</ReactMarkdown></div>
+                  ? <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{m.content}</ReactMarkdown></div>
                   : m.content}
               </div>
             </div>
@@ -390,6 +391,40 @@ function HistoryPanel({ history, onClear, onClose }) {
 }
 
 // ── Main app ───────────────────────────────────────────────────────────────
+
+// ── Markdown table renderer ────────────────────────────────────────────────
+// Detects delta values (e.g. "+5 dB", "−3%", "-2.1 kHz") in cells and
+// applies green/red colouring so differences stand out in the EQ table.
+
+function deltaClass(text) {
+  const s = String(text).trim();
+  if (/^[+＋]/.test(s) || /^\+\d/.test(s)) return "td-positive";
+  if (/^[-−–]/.test(s) || /^−\d/.test(s))  return "td-negative";
+  return "";
+}
+
+const MD_COMPONENTS = {
+  table: (props) => (
+    <div className="md-table-wrap">
+      <table className="md-table" {...props} />
+    </div>
+  ),
+  thead: (props) => <thead className="md-thead" {...props} />,
+  tbody: (props) => <tbody {...props} />,
+  tr:    (props) => <tr className="md-tr" {...props} />,
+  th:    ({ children, style, ...props }) => (
+    <th className="md-th" style={style} {...props}>{children}</th>
+  ),
+  td:    ({ children, style, ...props }) => {
+    const text = typeof children === "string" ? children
+      : Array.isArray(children) ? children.join("") : "";
+    return (
+      <td className={`md-td ${deltaClass(text)}`} style={style} {...props}>
+        {children}
+      </td>
+    );
+  },
+};
 
 const freqLabels = [
   ["Sub-bass",  "sub_bass_pct"],
@@ -676,7 +711,7 @@ export default function App() {
             </h2>
             <div className="suggestions-card">
               {suggestions ? (
-                <div className="markdown-body"><ReactMarkdown>{suggestions}</ReactMarkdown></div>
+                <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{suggestions}</ReactMarkdown></div>
               ) : (
                 <div className="suggestions-placeholder">
                   <span className="spinner large" />

@@ -580,6 +580,52 @@ body {
   font-weight: 600;
 }
 
+/* ── Markdown tables ── */
+.md-table-wrap {
+  overflow-x: auto;
+  margin: 14px 0 18px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.md-thead {
+  background: var(--bg3);
+}
+
+.md-th {
+  padding: 9px 14px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.md-tr:nth-child(even) { background: color-mix(in srgb, var(--bg3) 50%, transparent); }
+.md-tr:hover           { background: color-mix(in srgb, var(--purple) 6%, transparent); }
+
+.md-td {
+  padding: 8px 14px;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.md-tr:last-child .md-td { border-bottom: none; }
+
+/* Delta colouring */
+.td-positive { color: #43d9ad; font-weight: 600; }
+.td-negative { color: #ff6584; font-weight: 600; }
+
 .markdown-body code {
   background: var(--bg3);
   border: 1px solid var(--border);
