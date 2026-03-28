@@ -1,11 +1,14 @@
 import glob
+import hashlib
 import json
 import os
 import re
+import threading
 import time
 import uuid
 import tempfile
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 import numpy as np
@@ -211,6 +214,40 @@ def analyze_audio(file_path: str) -> dict:
     }
 
 
+# ── Analysis cache ─────────────────────────────────────────────────────────
+# Keyed by SHA-256 of file contents. Re-uploading the same audio file skips
+# all librosa work and returns the stored result instantly.
+
+_analysis_cache: dict = {}
+_cache_lock = threading.Lock()
+_CACHE_MAX = 20  # max entries; oldest evicted first (FIFO) when full
+
+
+def _file_hash(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _analyze_cached(path: str) -> dict:
+    """Run analyze_audio, returning a cached result if the file was seen before."""
+    digest = _file_hash(path)
+    with _cache_lock:
+        if digest in _analysis_cache:
+            return _analysis_cache[digest]
+
+    result = analyze_audio(path)
+
+    with _cache_lock:
+        if len(_analysis_cache) >= _CACHE_MAX:
+            del _analysis_cache[next(iter(_analysis_cache))]  # evict oldest
+        _analysis_cache[digest] = result
+
+    return result
+
+
 def _average_analysis_dicts(analyses: list) -> dict:
     """Average multiple analyses into a single target reference profile."""
     n = len(analyses)
@@ -366,8 +403,11 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int) -> N
         job["stage"] = "extracting"
         _write_job(job_id, job)
 
-        ref_analyses = [analyze_audio(p) for p in ref_paths]
-        wip_analysis = analyze_audio(wip_path)
+        all_paths = ref_paths + [wip_path]
+        with ThreadPoolExecutor(max_workers=len(all_paths)) as pool:
+            results = list(pool.map(_analyze_cached, all_paths))
+        ref_analyses = results[: len(ref_paths)]
+        wip_analysis = results[-1]
         ref_analysis = _average_analysis_dicts(ref_analyses)
 
         job["stage"] = "generating"
