@@ -1,3 +1,5 @@
+import glob
+import json
 import os
 import time
 import uuid
@@ -272,31 +274,73 @@ Be direct, technical, and specific. Use actual numbers from the analyses when ma
 """
 
 
-# ── Job store ─────────────────────────────────────────────────────────────
-# Each job: {status, stage, created_at, result, error}
-# status: "running" | "done" | "error"
-# stage:  "extracting" | "generating" | "done"
-_jobs: dict = {}
-_JOB_TTL = 1800  # 30 minutes
+# ── Job store (disk-backed) ────────────────────────────────────────────────
+# Each job is a JSON file at <tmpdir>/songanalyzer_<job_id>.json so results
+# survive a server restart (e.g. Railway OOM-kills the process mid-analysis
+# but the completed result is still readable on the next poll).
+#
+# Schema: {status, stage, created_at, result, error}
+#   status: "running" | "done" | "error"
+#   stage:  "extracting" | "generating" | "done"
+
+_JOB_DIR = tempfile.gettempdir()
+_JOB_PREFIX = "songanalyzer_"
+_JOB_TTL = 3600  # 1 hour
+
+
+def _job_path(job_id: str) -> str:
+    return os.path.join(_JOB_DIR, f"{_JOB_PREFIX}{job_id}.json")
+
+
+def _write_job(job_id: str, data: dict) -> None:
+    """Atomically write job state so a crash mid-write can't corrupt the file."""
+    path = _job_path(job_id)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as fh:
+        json.dump(data, fh)
+    os.replace(tmp_path, path)  # atomic on POSIX
+
+
+def _read_job(job_id: str) -> dict | None:
+    try:
+        with open(_job_path(job_id)) as fh:
+            return json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def _delete_job(job_id: str) -> None:
+    try:
+        os.unlink(_job_path(job_id))
+    except OSError:
+        pass
 
 
 def _cleanup_old_jobs() -> None:
+    """Remove job files older than _JOB_TTL seconds."""
     cutoff = time.time() - _JOB_TTL
-    stale = [jid for jid, j in _jobs.items() if j["created_at"] < cutoff]
-    for jid in stale:
-        del _jobs[jid]
+    for path in glob.glob(os.path.join(_JOB_DIR, f"{_JOB_PREFIX}*.json")):
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.unlink(path)
+        except OSError:
+            pass
 
 
 def _run_analysis(job_id: str, ref_path: str, wip_path: str) -> None:
     """Blocking worker — FastAPI runs sync BackgroundTasks in a thread pool."""
     try:
-        _jobs[job_id]["stage"] = "extracting"
+        job = _read_job(job_id) or {}
+        job["stage"] = "extracting"
+        _write_job(job_id, job)
+
         ref_analysis = analyze_audio(ref_path)
         wip_analysis = analyze_audio(wip_path)
 
-        _jobs[job_id]["stage"] = "generating"
-        prompt = build_comparison_prompt(ref_analysis, wip_analysis)
+        job["stage"] = "generating"
+        _write_job(job_id, job)
 
+        prompt = build_comparison_prompt(ref_analysis, wip_analysis)
         client = anthropic.Anthropic()
         response = client.messages.create(
             model="claude-opus-4-6",
@@ -305,7 +349,7 @@ def _run_analysis(job_id: str, ref_path: str, wip_path: str) -> None:
         )
         suggestions = next(b.text for b in response.content if b.type == "text")
 
-        _jobs[job_id].update({
+        job.update({
             "status": "done",
             "stage": "done",
             "result": {
@@ -314,9 +358,12 @@ def _run_analysis(job_id: str, ref_path: str, wip_path: str) -> None:
                 "suggestions": suggestions,
             },
         })
+        _write_job(job_id, job)
 
     except Exception as exc:
-        _jobs[job_id].update({"status": "error", "error": str(exc)})
+        job = _read_job(job_id) or {}
+        job.update({"status": "error", "error": str(exc)})
+        _write_job(job_id, job)
 
     finally:
         for path in [ref_path, wip_path]:
@@ -357,13 +404,13 @@ async def analyze(
 
     _cleanup_old_jobs()
     job_id = uuid.uuid4().hex
-    _jobs[job_id] = {
+    _write_job(job_id, {
         "status": "running",
         "stage": "extracting",
         "created_at": time.time(),
         "result": None,
         "error": None,
-    }
+    })
 
     # Add as a sync function — FastAPI runs it in a thread pool so the
     # event loop is never blocked by librosa or the Claude API call.
@@ -374,15 +421,23 @@ async def analyze(
 
 @app.get("/status/{job_id}")
 def get_status(job_id: str):
-    job = _jobs.get(job_id)
+    job = _read_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found or expired")
-    return {
+
+    response = {
         "status": job["status"],   # "running" | "done" | "error"
         "stage":  job["stage"],    # "extracting" | "generating" | "done"
         "result": job["result"],
         "error":  job["error"],
     }
+
+    # Delete the job file once the client has received the terminal result,
+    # freeing disk space immediately. TTL cleanup catches anything missed.
+    if job["status"] in ("done", "error"):
+        _delete_job(job_id)
+
+    return response
 
 
 # ── Static file serving (production) ──────────────────────────────────────
