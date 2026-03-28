@@ -184,30 +184,52 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
         n      = len(sections)
         labels = [""] * n
 
-        # Pass 1 — Intro: first section noticeably below average energy
-        if section_energies[0] < mean_e * 0.75:
-            labels[0] = "Intro"
+        # Pass 0 — First section is ALWAYS Intro in EDM, regardless of energy.
+        # A track never opens with a Drop; a high-energy opener is still an intro.
+        labels[0] = "Intro"
 
-        # Pass 1b — Outro: last section noticeably below average (needs ≥2 sections)
+        # Pass 1 — Outro: last section clearly below average energy (≥2 sections needed)
         if n > 1 and section_energies[-1] < mean_e * 0.75:
             labels[-1] = "Outro"
 
-        # Pass 2 — Drop: sustained high-energy section (energy ≥1.35× mean AND ≥20 s).
-        # Requiring duration filters out brief transient spikes that aren't true drops.
+        # Pass 2 — Drop detection with three structural guards:
+        #   (a) must start ≥30 s into the song  — drops never open a track
+        #   (b) must be ≥20 s long              — filters transient spikes
+        #   (c) context-aware energy threshold:
+        #       · 1.35× mean when preceded by a plausible buildup (unlabeled section
+        #         with moderate energy ≥0.85× mean — it has "build" energy without
+        #         yet being a drop itself)
+        #       · 1.50× mean otherwise (more conservative without a clear buildup)
         for i in range(n):
             if labels[i]:
                 continue
+            if sections[i]["start"] < 30.0:
+                continue
             duration = sections[i]["end"] - sections[i]["start"]
-            if section_energies[i] >= mean_e * 1.35 and duration >= 20.0:
+            has_buildup_before = (
+                i > 0
+                and not labels[i - 1]
+                and section_energies[i - 1] >= mean_e * 0.85
+            )
+            threshold = mean_e * 1.35 if has_buildup_before else mean_e * 1.50
+            if section_energies[i] >= threshold and duration >= 20.0:
                 labels[i] = "Drop"
 
-        # If no drops found with strict criteria, relax only the duration guard
-        # (keeps the 1.35× energy threshold to stay selective)
+        # Fallback: if still no drops, relax only the duration guard while keeping
+        # the position guard (≥30 s) and the context-aware energy thresholds.
         if not any(lbl == "Drop" for lbl in labels):
             for i in range(n):
                 if labels[i]:
                     continue
-                if section_energies[i] >= mean_e * 1.25:
+                if sections[i]["start"] < 30.0:
+                    continue
+                has_buildup_before = (
+                    i > 0
+                    and not labels[i - 1]
+                    and section_energies[i - 1] >= mean_e * 0.85
+                )
+                threshold = mean_e * 1.25 if has_buildup_before else mean_e * 1.40
+                if section_energies[i] >= threshold:
                     labels[i] = "Drop"
 
         # Pass 3 — Buildup: unlabeled section immediately before a Drop
@@ -215,8 +237,7 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
             if not labels[i] and labels[i + 1] == "Drop":
                 labels[i] = "Buildup"
 
-        # Pass 4 — Breakdown: unlabeled section after a Drop that has clearly
-        # lower energy than that drop (not just any post-drop section).
+        # Pass 4 — Breakdown: unlabeled section after a Drop with clearly lower energy
         for i in range(1, n):
             if not labels[i] and labels[i - 1] == "Drop":
                 drop_e = section_energies[i - 1]
