@@ -35,7 +35,7 @@ function AudioUploadBox({ label, sublabel, file, onFileChange, color, icon }) {
       <input
         ref={inputRef}
         type="file"
-        accept=".mp3,.wav,.flac,.ogg,.aiff,.aif,.m4a,audio/*"
+        accept=".mp3,.wav,.flac,.aiff,.aif,audio/*"
         style={{ display: "none" }}
         onChange={(e) => e.target.files[0] && onFileChange(e.target.files[0])}
       />
@@ -52,7 +52,7 @@ function AudioUploadBox({ label, sublabel, file, onFileChange, color, icon }) {
         <div className="upload-hint">
           Drop an audio file here or click to browse
           <br />
-          <span className="upload-formats">MP3 · WAV · FLAC · OGG · AIFF · M4A</span>
+          <span className="upload-formats">MP3 · WAV · FLAC · AIFF · max 100 MB</span>
         </div>
       )}
     </div>
@@ -290,6 +290,196 @@ function SectionComparisonPanel({ refAnalysis, wipAnalysis }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ── Waveform chart (SVG energy envelope) ──────────────────────────────────
+
+function WaveformChart({ refAnalysis, wipAnalysis }) {
+  if (!refAnalysis?.energy_profile?.length || !wipAnalysis?.energy_profile?.length) return null;
+
+  const W = 860, H = 150;
+  const PL = 40, PR = 12, PT = 12, PB = 28;
+  const PW = W - PL - PR;
+  const PH = H - PT - PB;
+
+  const refP = refAnalysis.energy_profile;
+  const wipP = wipAnalysis.energy_profile;
+
+  const maxTime = Math.max(refP.at(-1)?.time ?? 0, wipP.at(-1)?.time ?? 0, 1);
+  const maxEnergy = Math.max(...refP.map((p) => p.energy), ...wipP.map((p) => p.energy), 1e-9);
+
+  const tx = (t) => (PL + (t / maxTime) * PW).toFixed(1);
+  const ty = (e) => (PT + PH - (e / maxEnergy) * PH).toFixed(1);
+
+  const linePath = (pts) =>
+    pts.length === 0 ? "" : "M " + pts.map((p) => `${tx(p.time)},${ty(p.energy)}`).join(" L ");
+
+  const fillPath = (pts) => {
+    if (!pts.length) return "";
+    const y0 = (PT + PH).toFixed(1);
+    const line = pts.map((p) => `${tx(p.time)},${ty(p.energy)}`).join(" L ");
+    return `M ${tx(pts[0].time)},${y0} L ${line} L ${tx(pts.at(-1).time)},${y0} Z`;
+  };
+
+  const tickInterval = maxTime > 180 ? 60 : 30;
+  const xTicks = [];
+  for (let t = 0; t <= maxTime; t += tickInterval) {
+    const m = Math.floor(t / 60);
+    const s = t % 60;
+    xTicks.push({ x: tx(t), label: m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${t}s` });
+  }
+
+  return (
+    <div className="waveform-section">
+      <div className="freq-header">
+        <span className="freq-title">Energy Envelope</span>
+        <div className="freq-legend">
+          <span className="legend-dot ref-dot" /> Reference
+          <span className="legend-dot wip-dot" /> WIP
+        </div>
+      </div>
+      <div className="waveform-chart-wrap">
+        <svg viewBox={`0 0 ${W} ${H}`} className="waveform-svg" preserveAspectRatio="none">
+          {/* Y grid */}
+          {[0.25, 0.5, 0.75, 1.0].map((pct) => {
+            const y = ty(maxEnergy * pct);
+            return (
+              <g key={pct}>
+                <line x1={PL} y1={y} x2={W - PR} y2={y} stroke="rgba(255,255,255,0.05)" strokeWidth="1" />
+                <text x={PL - 5} y={Number(y) + 4} textAnchor="end" fill="rgba(255,255,255,0.25)" fontSize="9">
+                  {Math.round(pct * 100)}%
+                </text>
+              </g>
+            );
+          })}
+
+          {/* Fills */}
+          <path d={fillPath(refP)} fill="rgba(108,99,255,0.07)" />
+          <path d={fillPath(wipP)} fill="rgba(255,101,132,0.07)" />
+
+          {/* Section markers — WIP (pink) */}
+          {(wipAnalysis.sections ?? []).slice(1).map((sec, i) => (
+            <g key={`ws${i}`}>
+              <line x1={tx(sec.start)} y1={PT} x2={tx(sec.start)} y2={PT + PH}
+                stroke="rgba(255,101,132,0.3)" strokeWidth="1" strokeDasharray="3,3" />
+              <text x={Number(tx(sec.start)) + 3} y={PT + 10} fill="rgba(255,101,132,0.65)" fontSize="8.5">
+                {sec.label}
+              </text>
+            </g>
+          ))}
+
+          {/* Section markers — Ref (purple, no label to avoid clutter) */}
+          {(refAnalysis.sections ?? []).slice(1).map((sec, i) => (
+            <line key={`rs${i}`} x1={tx(sec.start)} y1={PT} x2={tx(sec.start)} y2={PT + PH}
+              stroke="rgba(108,99,255,0.2)" strokeWidth="1" strokeDasharray="3,3" />
+          ))}
+
+          {/* Lines */}
+          <path d={linePath(refP)} fill="none" stroke="#6c63ff" strokeWidth="1.5" />
+          <path d={linePath(wipP)} fill="none" stroke="#ff6584" strokeWidth="1.5" />
+
+          {/* Axes */}
+          <line x1={PL} y1={PT} x2={PL} y2={PT + PH} stroke="rgba(255,255,255,0.12)" strokeWidth="1" />
+          <line x1={PL} y1={PT + PH} x2={W - PR} y2={PT + PH} stroke="rgba(255,255,255,0.12)" strokeWidth="1" />
+
+          {/* X ticks */}
+          {xTicks.map((tk, i) => (
+            <g key={i}>
+              <line x1={tk.x} y1={PT + PH} x2={tk.x} y2={PT + PH + 4}
+                stroke="rgba(255,255,255,0.2)" strokeWidth="1" />
+              <text x={tk.x} y={PT + PH + 14} textAnchor="middle" fill="rgba(255,255,255,0.3)" fontSize="9">
+                {tk.label}
+              </text>
+            </g>
+          ))}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+// ── Sidechain comparison panel ─────────────────────────────────────────────
+
+function SidechainPanel({ refAnalysis, wipAnalysis }) {
+  const refSC = refAnalysis?.sidechain;
+  const wipSC = wipAnalysis?.sidechain;
+  if (!refSC && !wipSC) return null;
+
+  function SCTrack({ sc, color }) {
+    if (!sc) return <span style={{ color: "var(--text-muted)" }}>—</span>;
+    return (
+      <div className="sidechain-track">
+        <div className={`sidechain-detected ${sc.detected ? "yes" : "no"}`}>
+          {sc.detected ? "Detected" : "Not Detected"}
+        </div>
+        {sc.detected ? (
+          <div className="sidechain-stats">
+            <div className="sc-stat">
+              <span className="sc-stat-lbl">Depth</span>
+              <span className="sc-stat-val" style={{ color }}>{sc.depth_db} dB</span>
+            </div>
+            {sc.release_ms != null && (
+              <div className="sc-stat">
+                <span className="sc-stat-lbl">Release</span>
+                <span className="sc-stat-val" style={{ color }}>{sc.release_ms} ms</span>
+              </div>
+            )}
+            {sc.rate && (
+              <div className="sc-stat">
+                <span className="sc-stat-lbl">Rate</span>
+                <span className="sc-stat-val" style={{ color }}>{sc.rate}</span>
+              </div>
+            )}
+            <div className="sc-stat">
+              <span className="sc-stat-lbl">Consistency</span>
+              <span className="sc-stat-val" style={{ color }}>{Math.round((sc.consistency ?? 0) * 100)}%</span>
+            </div>
+          </div>
+        ) : (
+          sc.depth_db > 0 && (
+            <div className="sidechain-hint">Avg depth: {sc.depth_db} dB (below detection threshold)</div>
+          )
+        )}
+      </div>
+    );
+  }
+
+  // Determine flag to show
+  let flag = null;
+  const refDet = refSC?.detected ?? false;
+  const wipDet = wipSC?.detected ?? false;
+  if (refDet && !wipDet) {
+    flag = { type: "warning", msg: "Reference has sidechain compression but your WIP does not. Consider adding sidechain to bass/pad elements." };
+  } else if (refDet && wipDet) {
+    const diff = (wipSC?.depth_db ?? 0) - (refSC?.depth_db ?? 0);
+    if (diff < -3)
+      flag = { type: "warning", msg: `WIP sidechain is ${Math.abs(diff).toFixed(1)} dB more subtle than the reference. Increase depth for more pump.` };
+    else if (diff > 3)
+      flag = { type: "info", msg: `WIP sidechain is ${diff.toFixed(1)} dB more aggressive than the reference. Consider reducing for a cleaner mix.` };
+  }
+
+  return (
+    <div className="sidechain-panel">
+      <div className="freq-header" style={{ marginBottom: 14 }}>
+        <span className="freq-title">Sidechain Compression</span>
+      </div>
+      <div className="sidechain-grid">
+        <div className="sidechain-col">
+          <div className="sidechain-col-header ref-text">Reference</div>
+          <SCTrack sc={refSC} color="var(--purple)" />
+        </div>
+        <div className="sidechain-col">
+          <div className="sidechain-col-header wip-text">WIP</div>
+          <SCTrack sc={wipSC} color="var(--pink)" />
+        </div>
+      </div>
+      {flag && (
+        <div className={`sidechain-flag ${flag.type}`}>
+          {flag.type === "warning" ? "⚠ " : "ℹ "}{flag.msg}
+        </div>
+      )}
     </div>
   );
 }
@@ -737,6 +927,8 @@ export default function App() {
                 </div>
 
                 <SectionComparisonPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
+                <WaveformChart refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
+                <SidechainPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
               </>
             )}
           </section>
