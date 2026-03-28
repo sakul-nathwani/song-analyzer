@@ -1,6 +1,7 @@
 import glob
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -12,6 +13,13 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, wait as cf_wait
 from datetime import datetime, timezone, timedelta
 from typing import List
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("song-analyzer")
 
 import numpy as np
 import librosa
@@ -338,12 +346,64 @@ def detect_sidechain(y, sr, tempo_bpm, beat_frames, stft, freqs, hop_length=512)
     }
 
 
+def _estimate_bpm(y: np.ndarray, sr: int) -> tuple[float, np.ndarray]:
+    """
+    Return (bpm, beat_frames) using a multi-method consensus:
+    1. librosa.feature.tempo on the full track (onset-envelope-based global estimate)
+    2. beat_track with 4/4 and 3/4 time signatures on the full track
+    3. beat_track across overlapping 60-second windows (handles tempo drift)
+    All candidates are collected, the median is taken as the consensus, and the
+    result is rounded to the nearest 0.5 BPM.
+    """
+    hop_length = 512
+    onset_env  = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
+
+    candidates: list[float] = []
+
+    # ── 1. Global tempo via autocorrelation (librosa.feature.tempo) ──────────
+    global_tempo = librosa.feature.tempo(onset_envelope=onset_env, sr=sr, hop_length=hop_length)
+    candidates.append(float(np.squeeze(global_tempo)))
+
+    # ── 2. beat_track with 4/4 (tightness=100) and 3/4 (tightness=80) ───────
+    tempo_44, beat_frames_44 = librosa.beat.beat_track(
+        onset_envelope=onset_env, sr=sr, hop_length=hop_length, tightness=100
+    )
+    candidates.append(float(np.squeeze(tempo_44)))
+
+    tempo_34, _ = librosa.beat.beat_track(
+        onset_envelope=onset_env, sr=sr, hop_length=hop_length,
+        tightness=80, start_bpm=float(np.squeeze(tempo_44)) * (3 / 4),
+    )
+    candidates.append(float(np.squeeze(tempo_34)) * (4 / 3))  # normalise to 4/4 equivalent
+
+    # ── 3. Windowed estimates (60-second windows, 30-second step) ────────────
+    window_samples = int(60 * sr)
+    step_samples   = int(30 * sr)
+    for start in range(0, max(1, len(y) - window_samples), step_samples):
+        segment = y[start : start + window_samples]
+        if len(segment) < sr * 10:   # skip segments shorter than 10 s
+            continue
+        env_seg = librosa.onset.onset_strength(y=segment, sr=sr, hop_length=hop_length)
+        t, _ = librosa.beat.beat_track(
+            onset_envelope=env_seg, sr=sr, hop_length=hop_length, tightness=100
+        )
+        val = float(np.squeeze(t))
+        if val > 0:
+            candidates.append(val)
+
+    # ── Consensus: median, then round to nearest 0.5 BPM ────────────────────
+    consensus = float(np.median([c for c in candidates if c > 0]))
+    bpm = round(consensus * 2) / 2   # nearest 0.5
+
+    # Return beat_frames from the full-track 4/4 pass (used downstream)
+    return bpm, beat_frames_44
+
+
 def analyze_audio(file_path: str) -> dict:
     y, sr = librosa.load(file_path, sr=22050, mono=True, duration=360)
     duration = librosa.get_duration(y=y, sr=sr)
 
-    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-    bpm = float(np.squeeze(tempo))
+    bpm, beat_frames = _estimate_bpm(y, sr)
 
     key = detect_key(y, sr)
 
@@ -391,7 +451,7 @@ def analyze_audio(file_path: str) -> dict:
 
     return {
         "duration_seconds": round(duration, 2),
-        "tempo_bpm":        round(bpm, 1),
+        "tempo_bpm":        bpm,  # already rounded to nearest 0.5 by _estimate_bpm
         "key":              key,
         "loudness": {
             "average_db":       round(avg_loudness_db, 2),
@@ -452,30 +512,45 @@ def _analyze_stem(path: str, stem_name: str) -> dict:
     }
 
 
-def _get_or_create_stems(file_path: str, file_hash: str) -> dict | None:
+def _get_or_create_stems(file_path: str, file_hash: str) -> tuple[dict, str | None]:
     """
-    Return {stem_name: local_tmp_path} for drums / bass / other.
-    Checks Supabase Storage first (keyed by SHA-256 of the original file);
-    on cache-miss, runs ryan5453/demucs on Replicate and stores the result.
-    Returns None when env vars are missing or on unrecoverable error.
+    Return (stem_path_map, error_message).
+    stem_path_map is {stem_name: local_tmp_path} for drums / bass / other, or {}
+    on failure. error_message is None on success, a human-readable string on failure.
+
+    Checks Supabase Storage first (keyed by SHA-256); on cache-miss runs
+    ryan5453/demucs on Replicate and stores results back in Supabase.
     """
-    if not os.environ.get("REPLICATE_API_TOKEN", ""):
-        return None
+    replicate_token = os.environ.get("REPLICATE_API_TOKEN", "")
+    if not replicate_token:
+        msg = "REPLICATE_API_TOKEN is not set — stem separation requires a Replicate API key"
+        log.warning("[stems] %s", msg)
+        return {}, msg
+
     sb = _get_supabase_client()
     if sb is None:
-        return None
+        msg = "Supabase is not configured (SUPABASE_URL / SUPABASE_SERVICE_KEY missing)"
+        log.warning("[stems] %s", msg)
+        return {}, msg
+
+    log.info("[stems] Starting stem pipeline for hash=%s", file_hash[:12])
 
     # ── 1. Try Supabase cache ──────────────────────────────────────────────
     stem_paths: dict[str, str] = {}
     try:
+        log.info("[stems] Checking Supabase cache at bucket=%s prefix=%s/", _SUPABASE_BUCKET, file_hash[:12])
         for stem in _STEM_NAMES:
-            data = sb.storage.from_(_SUPABASE_BUCKET).download(f"{file_hash}/{stem}.wav")
+            storage_key = f"{file_hash}/{stem}.wav"
+            data = sb.storage.from_(_SUPABASE_BUCKET).download(storage_key)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tf:
                 tf.write(data)
                 stem_paths[stem] = tf.name
+            log.info("[stems] Cache hit: %s (%d bytes)", stem, len(data))
         if len(stem_paths) == len(_STEM_NAMES):
-            return stem_paths
-    except Exception:
+            log.info("[stems] All stems served from Supabase cache")
+            return stem_paths, None
+    except Exception as exc:
+        log.info("[stems] Cache miss or partial (%s) — will run Replicate", exc)
         for p in stem_paths.values():
             try: os.unlink(p)
             except: pass
@@ -485,6 +560,8 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> dict | None:
     ext        = os.path.splitext(file_path)[1] or ".wav"
     upload_key = f"uploads/{file_hash}{ext}"
     try:
+        file_size = os.path.getsize(file_path)
+        log.info("[stems] Uploading original to Supabase (%d bytes) → %s", file_size, upload_key)
         with open(file_path, "rb") as fh:
             file_bytes = fh.read()
         try:
@@ -492,11 +569,12 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> dict | None:
                 upload_key, file_bytes,
                 file_options={"content-type": "audio/mpeg", "upsert": "true"},
             )
-        except Exception:
-            pass  # already exists is fine
+            log.info("[stems] Uploaded original to Supabase successfully")
+        except Exception as upload_exc:
+            log.info("[stems] Upload attempt returned: %s (may already exist, continuing)", upload_exc)
 
         signed = sb.storage.from_(_SUPABASE_BUCKET).create_signed_url(upload_key, expires_in=3600)
-        # SDK versions differ in the key name
+        log.info("[stems] create_signed_url response keys: %s", list(signed.keys()) if isinstance(signed, dict) else type(signed))
         audio_url = (
             signed.get("signedURL")
             or signed.get("signedUrl")
@@ -504,37 +582,66 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> dict | None:
             or (signed.get("data") or {}).get("signedURL")
         )
         if not audio_url:
-            return None
-    except Exception:
-        return None
+            msg = f"Could not extract signed URL from Supabase response: {signed}"
+            log.error("[stems] %s", msg)
+            return {}, msg
+        log.info("[stems] Got signed URL (length=%d)", len(audio_url))
+    except Exception as exc:
+        msg = f"Supabase upload/sign failed: {exc}"
+        log.error("[stems] %s", msg, exc_info=True)
+        return {}, msg
 
     # ── 3. Run Demucs on Replicate ─────────────────────────────────────────
     try:
         import replicate as _replicate  # noqa: PLC0415
+        log.info("[stems] Submitting to Replicate (ryan5453/demucs) — this may take 1-3 minutes")
+        t0 = time.time()
         output = _replicate.run("ryan5453/demucs", input={"audio": audio_url})
-    except Exception:
-        return None
+        elapsed = time.time() - t0
+        log.info("[stems] Replicate completed in %.1fs, output type=%s", elapsed, type(output).__name__)
+        if isinstance(output, dict):
+            log.info("[stems] Replicate output keys: %s", list(output.keys()))
+        elif hasattr(output, "__iter__"):
+            items = list(output)
+            log.info("[stems] Replicate output is iterable with %d items", len(items))
+            output = items
+    except Exception as exc:
+        msg = f"Replicate API call failed: {exc}"
+        log.error("[stems] %s", msg, exc_info=True)
+        return {}, msg
 
-    # ── 4. Download stems and cache them in Supabase ───────────────────────
-    # output is typically {stem_name: FileOutput|url} but handle lists too
+    # ── 4. Parse Replicate output into {stem: url} ─────────────────────────
     stem_url_map: dict[str, str] = {}
     if isinstance(output, dict):
         stem_url_map = {k: str(v) for k, v in output.items() if k in _STEM_NAMES}
-    elif hasattr(output, "__iter__"):
+        log.info("[stems] Parsed dict output: found stems %s", list(stem_url_map.keys()))
+    elif isinstance(output, list):
         for item in output:
             name = getattr(item, "name", None) or getattr(item, "stem", None)
             if name and name in _STEM_NAMES:
                 stem_url_map[name] = str(item)
+        log.info("[stems] Parsed list output: found stems %s", list(stem_url_map.keys()))
 
+    if not stem_url_map:
+        msg = f"Replicate returned no recognisable stem URLs. Raw output: {output!r:.200}"
+        log.error("[stems] %s", msg)
+        return {}, msg
+
+    # ── 5. Download stems locally and cache in Supabase ───────────────────
     for stem in _STEM_NAMES:
         url = stem_url_map.get(stem)
         if not url:
+            log.warning("[stems] No URL for stem '%s' in Replicate output", stem)
             continue
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tf:
                 stem_local = tf.name
+            log.info("[stems] Downloading %s stem from Replicate...", stem)
             urllib.request.urlretrieve(url, stem_local)
+            size = os.path.getsize(stem_local)
+            log.info("[stems] Downloaded %s: %d bytes → %s", stem, size, stem_local)
             stem_paths[stem] = stem_local
+
             with open(stem_local, "rb") as fh:
                 stem_bytes = fh.read()
             try:
@@ -542,19 +649,32 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> dict | None:
                     f"{file_hash}/{stem}.wav", stem_bytes,
                     file_options={"content-type": "audio/wav", "upsert": "true"},
                 )
-            except Exception:
-                pass
-        except Exception:
+                log.info("[stems] Cached %s in Supabase", stem)
+            except Exception as cache_exc:
+                log.warning("[stems] Failed to cache %s in Supabase: %s", stem, cache_exc)
+        except Exception as dl_exc:
+            log.error("[stems] Failed to download %s: %s", stem, dl_exc, exc_info=True)
             continue
 
-    return stem_paths if stem_paths else None
-
-
-def _run_stem_analysis_pipeline(file_path: str, file_hash: str) -> dict:
-    """Fetch / create stems then run librosa on each in parallel. Returns {} on failure."""
-    stem_paths = _get_or_create_stems(file_path, file_hash)
     if not stem_paths:
-        return {}
+        msg = "All stem downloads failed — check Replicate output URLs"
+        log.error("[stems] %s", msg)
+        return {}, msg
+
+    log.info("[stems] Successfully produced %d stems: %s", len(stem_paths), list(stem_paths.keys()))
+    return stem_paths, None
+
+
+def _run_stem_analysis_pipeline(file_path: str, file_hash: str) -> tuple[dict, str | None]:
+    """
+    Fetch/create stems then run librosa on each in parallel.
+    Returns (analysis_dict, error_message). On failure analysis_dict is {}.
+    """
+    stem_paths, stem_error = _get_or_create_stems(file_path, file_hash)
+    if not stem_paths:
+        return {}, stem_error
+
+    log.info("[stems] Running librosa on %d stems in parallel", len(stem_paths))
     results: dict[str, dict] = {}
     try:
         with ThreadPoolExecutor(max_workers=len(stem_paths)) as pool:
@@ -563,13 +683,17 @@ def _run_stem_analysis_pipeline(file_path: str, file_hash: str) -> dict:
             for stem, fut in futures.items():
                 try:
                     results[stem] = fut.result(timeout=120)
-                except Exception:
-                    pass
+                    log.info("[stems] librosa analysis done for stem '%s'", stem)
+                except Exception as exc:
+                    log.error("[stems] librosa analysis failed for stem '%s': %s", stem, exc)
     finally:
         for p in stem_paths.values():
             try: os.unlink(p)
             except: pass
-    return results
+
+    if not results:
+        return {}, "Stem analysis (librosa) failed for all stems"
+    return results, None
 
 
 def _average_stem_analyses(analyses_list: list[dict]) -> dict:
@@ -668,7 +792,7 @@ def _average_analysis_dicts(analyses: list) -> dict:
 
     return {
         "duration_seconds":   avg_scalar("duration_seconds"),
-        "tempo_bpm":          round(sum(a["tempo_bpm"] for a in analyses) / n, 1),
+        "tempo_bpm":          round(sum(a["tempo_bpm"] for a in analyses) / n * 2) / 2,
         "key":                Counter(a["key"] for a in analyses).most_common(1)[0][0],
         "loudness":           avg_subdict("loudness"),
         "frequency_spectrum": avg_subdict("frequency_spectrum"),
@@ -688,7 +812,7 @@ def _parse_priority_scores(text: str) -> list:
     try:
         scores = json.loads(m.group(1))
         if isinstance(scores, list):
-            return scores
+            return scores[:3]
     except (json.JSONDecodeError, ValueError):
         pass
     return []
@@ -766,7 +890,7 @@ IMPORTANT: Begin your response with a priority scores block, then the full markd
 <priority_scores>
 [
   {{"score": <1-10 integer, 10=most critical>, "label": "<3-5 word issue name>", "summary": "<one sentence: what is wrong and how to fix it>"}},
-  ...6-8 items sorted by score descending
+  ...exactly 3 items, sorted by score descending — the 3 most impactful issues only
 ]
 </priority_scores>
 
@@ -864,9 +988,13 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
         _write_job(job_id, job)
 
         all_paths = ref_paths + [wip_path]
+        stem_error_msg: str | None = None
+        log.info("[job %s] Starting analysis: %d file(s), deep_analysis=%s", job_id[:8], len(all_paths), deep_analysis)
 
         # Compute hashes up-front when stem caching is needed
         all_hashes = [_file_hash(p) for p in all_paths] if deep_analysis else []
+        if deep_analysis:
+            log.info("[job %s] File hashes: %s", job_id[:8], [h[:12] for h in all_hashes])
 
         max_workers = len(all_paths) * (2 if deep_analysis else 1)
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -877,26 +1005,78 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
                 if deep_analysis else []
             )
 
-            all_futures = analysis_futures + stem_futures
-            remaining = max(0.1, deadline - time.time())
-            done, not_done = cf_wait(all_futures, timeout=remaining)
-            if not_done:
-                for f in not_done:
-                    f.cancel()
-                raise TimeoutError(
-                    "Audio analysis timed out after 10 minutes. "
-                    "Please try a shorter or smaller audio file."
-                )
-            results      = [f.result() for f in analysis_futures]
-            stem_results = [f.result() for f in stem_futures] if stem_futures else [{} for _ in all_paths]
+            # Update stage to "separating" once audio analysis is done but stems are still running
+            if stem_futures:
+                audio_remaining = max(0.1, deadline - time.time())
+                audio_done, audio_not_done = cf_wait(analysis_futures, timeout=audio_remaining)
+                if audio_not_done:
+                    for f in audio_not_done:
+                        f.cancel()
+                    raise TimeoutError(
+                        "Audio analysis timed out after 10 minutes. "
+                        "Please try a shorter or smaller audio file."
+                    )
+                job["stage"] = "separating"
+                _write_job(job_id, job)
+                log.info("[job %s] Audio analysis done, waiting for stem separation", job_id[:8])
+
+                stem_remaining = max(0.1, deadline - time.time())
+                stem_done, stem_not_done = cf_wait(stem_futures, timeout=stem_remaining)
+                if stem_not_done:
+                    log.warning("[job %s] Stem futures timed out, continuing without stems", job_id[:8])
+                    for f in stem_not_done:
+                        f.cancel()
+            else:
+                all_futures = analysis_futures
+                remaining = max(0.1, deadline - time.time())
+                done, not_done = cf_wait(all_futures, timeout=remaining)
+                if not_done:
+                    for f in not_done:
+                        f.cancel()
+                    raise TimeoutError(
+                        "Audio analysis timed out after 10 minutes. "
+                        "Please try a shorter or smaller audio file."
+                    )
+
+            results = [f.result() for f in analysis_futures]
+
+            # Collect stem results — each future returns (analysis_dict, error_msg)
+            stem_errors: list[str] = []
+            raw_stem_results: list[dict] = []
+            for fut in stem_futures:
+                if fut.done() and not fut.cancelled():
+                    try:
+                        s_analysis, s_err = fut.result()
+                        raw_stem_results.append(s_analysis)
+                        if s_err:
+                            stem_errors.append(s_err)
+                    except Exception as exc:
+                        raw_stem_results.append({})
+                        stem_errors.append(str(exc))
+                else:
+                    raw_stem_results.append({})
+                    stem_errors.append("Stem separation timed out")
+
+            stem_results = raw_stem_results if raw_stem_results else [{} for _ in all_paths]
 
         ref_analyses   = results[: len(ref_paths)]
         wip_analysis   = results[-1]
         ref_analysis   = _average_analysis_dicts(ref_analyses)
+        log.info("[job %s] Audio analysis complete", job_id[:8])
 
         ref_stem_list  = stem_results[: len(ref_paths)]
-        wip_stems      = stem_results[-1]
+        wip_stems      = stem_results[-1] if stem_results else {}
         ref_stems      = _average_stem_analyses(ref_stem_list) if any(ref_stem_list) else {}
+
+        # Summarise stem outcome
+        stem_error_msg: str | None = None
+        if deep_analysis:
+            if ref_stems or wip_stems:
+                log.info("[job %s] Stem separation succeeded — ref stems: %s, wip stems: %s",
+                         job_id[:8], list(ref_stems.keys()), list(wip_stems.keys()))
+            else:
+                stem_error_msg = stem_errors[0] if stem_errors else "Stem separation produced no results"
+                log.warning("[job %s] Stem separation failed: %s", job_id[:8], stem_error_msg)
 
         if time.time() > deadline:
             raise TimeoutError(
@@ -929,6 +1109,7 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
         if deep_analysis and (ref_stems or wip_stems):
             stem_analyses_result = {"reference": ref_stems, "wip": wip_stems}
 
+        log.info("[job %s] Complete — writing result", job_id[:8])
         job.update({
             "status": "done",
             "stage":  "done",
@@ -939,6 +1120,7 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
                 "priority_scores": priority_scores,
                 "n_refs":          n_refs,
                 "stem_analyses":   stem_analyses_result,
+                "stem_error":      stem_error_msg,
             },
         })
         _write_job(job_id, job)
@@ -1046,11 +1228,13 @@ def get_status(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found or expired")
     # No auto-delete — job file must persist for the /chat endpoint.
     # TTL cleanup (_cleanup_old_jobs) handles removal after 1 hour.
+    result = job["result"] or {}
     return {
-        "status": job["status"],
-        "stage":  job["stage"],
-        "result": job["result"],
-        "error":  job["error"],
+        "status":     job["status"],
+        "stage":      job["stage"],
+        "result":     job["result"],
+        "error":      job["error"],
+        "stem_error": result.get("stem_error"),
     }
 
 

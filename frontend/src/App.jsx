@@ -125,20 +125,22 @@ function AnalysisPanel({ analysis, label, color }) {
 
 const STAGE_LABELS = {
   idle: null, uploading: "Uploading files...", extracting: "Extracting audio features...",
-  generating: "Generating AI feedback...", done: null, error: null,
+  separating: "Separating stems via Demucs...", generating: "Generating AI feedback...",
+  done: null, error: null,
 };
-const STEPS = [
-  { key: "uploading",  label: "Upload" },
-  { key: "extracting", label: "Analyze Audio" },
-  { key: "generating", label: "AI Feedback" },
-];
 
-function ProgressSteps({ stage }) {
-  const order   = ["uploading", "extracting", "generating", "done"];
+function ProgressSteps({ stage, deepAnalysis }) {
+  const steps = [
+    { key: "uploading",   label: "Upload" },
+    { key: "extracting",  label: "Analyze Audio" },
+    ...(deepAnalysis ? [{ key: "separating", label: "Separate Stems" }] : []),
+    { key: "generating",  label: "AI Feedback" },
+  ];
+  const order   = ["uploading", "extracting", ...(deepAnalysis ? ["separating"] : []), "generating", "done"];
   const current = order.indexOf(stage);
   return (
     <div className="progress-steps">
-      {STEPS.map((step, i) => {
+      {steps.map((step, i) => {
         const done   = current > i || stage === "done";
         const active = current === i && stage !== "done";
         return (
@@ -147,7 +149,7 @@ function ProgressSteps({ stage }) {
               {done ? "✓" : active ? <span className="step-spinner" /> : i + 1}
             </div>
             <span className="step-label">{step.label}</span>
-            {i < STEPS.length - 1 && <div className={`step-line ${done ? "done" : ""}`} />}
+            {i < steps.length - 1 && <div className={`step-line ${done ? "done" : ""}`} />}
           </div>
         );
       })}
@@ -164,7 +166,7 @@ function PriorityScoresPanel({ scores }) {
     <section className="priority-section">
       <h2 className="section-title">Priority Issues</h2>
       <div className="priority-list">
-        {scores.map((item, i) => (
+        {scores.slice(0, 3).map((item, i) => (
           <div key={i} className="priority-item">
             <div className="priority-badge" style={{ background: scoreColor(item.score) }}>
               {item.score}
@@ -781,6 +783,7 @@ export default function App() {
   const [wipAnalysis,    setWipAnalysis]    = useState(null);
   const [priorityScores, setPriorityScores] = useState([]);
   const [stemAnalyses,   setStemAnalyses]   = useState(null);
+  const [stemError,      setStemError]      = useState(null);
   const [deepAnalysis,   setDeepAnalysis]   = useState(false);
   const [jobId,          setJobId]          = useState(null);
   const [error,          setError]          = useState("");
@@ -797,7 +800,7 @@ export default function App() {
 
   const setStage = (s) => { stageRef.current = s; setStageState(s); };
 
-  const isAnalyzing = stage === "uploading" || stage === "extracting" || stage === "generating";
+  const isAnalyzing = stage === "uploading" || stage === "extracting" || stage === "separating" || stage === "generating";
 
   useEffect(() => {
     if (isAnalyzing) {
@@ -839,6 +842,7 @@ export default function App() {
     setWipAnalysis(null);
     setPriorityScores([]);
     setStemAnalyses(null);
+    setStemError(null);
     setJobId(null);
     setError("");
 
@@ -872,6 +876,9 @@ export default function App() {
           }
           const data = await statusRes.json();
 
+          if (data.stage === "separating" && stageRef.current !== "separating") {
+            setStage("separating");
+          }
           if (data.stage === "generating" && stageRef.current !== "generating") {
             setStage("generating");
           }
@@ -884,6 +891,7 @@ export default function App() {
             setSuggestions(data.result.suggestions);
             setPriorityScores(scores);
             setStemAnalyses(data.result.stem_analyses || null);
+            setStemError(data.stem_error || data.result?.stem_error || null);
             setStage("done");
             saveToHistory({
               id:              job_id,
@@ -1007,8 +1015,12 @@ export default function App() {
 
           {isAnalyzing && (
             <div className="analysis-progress">
-              <ProgressSteps stage={stage} />
-              <div className="elapsed">{elapsed}s elapsed — large files can take 30–60 seconds</div>
+              <ProgressSteps stage={stage} deepAnalysis={deepAnalysis} />
+              <div className="elapsed">
+                {elapsed}s elapsed
+                {stage === "separating" && " — Demucs stem separation running on GPU, this takes 1–3 min"}
+                {stage !== "separating" && " — large files can take 30–60 seconds"}
+              </div>
             </div>
           )}
         </section>
@@ -1016,6 +1028,17 @@ export default function App() {
         {/* Error */}
         {stage === "error" && (
           <div className="error-box"><span className="error-icon">⚠️</span> {error}</div>
+        )}
+
+        {/* Stem separation fallback warning */}
+        {stemError && stage === "done" && (
+          <div className="stem-error-box">
+            <span className="stem-error-icon">ⓘ</span>
+            <div>
+              <strong>Deep Analysis unavailable</strong> — regular analysis completed successfully.
+              <div className="stem-error-detail">{stemError}</div>
+            </div>
+          </div>
         )}
 
         {/* Priority scores */}

@@ -1290,6 +1290,35 @@ body {
   .deep-toggle { justify-content: center; }
 }
 
+/* ── Stem error banner ── */
+.stem-error-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  background: color-mix(in srgb, #ffb347 10%, var(--bg2));
+  border: 1px solid color-mix(in srgb, #ffb347 30%, transparent);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.stem-error-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+  color: #ffb347;
+  margin-top: 1px;
+}
+
+.stem-error-detail {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: "SF Mono", "Fira Code", monospace;
+  word-break: break-word;
+}
+
 /* ── Analyze row (button + deep toggle) ── */
 .analyze-row {
   display: flex;
