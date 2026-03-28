@@ -640,6 +640,93 @@ function HistoryPanel({ history, onClear, onClose }) {
   );
 }
 
+// ── Stem analysis panel ────────────────────────────────────────────────────
+
+const STEM_LABELS = { drums: "Drums", bass: "Bass", other: "Other" };
+const STEM_ORDER  = ["drums", "bass", "other"];
+
+function StemFreqMini({ fb, color }) {
+  if (!fb) return null;
+  const entries = [
+    ["Sub",  fb.sub_bass_pct],
+    ["Bass", fb.bass_pct],
+    ["LM",   fb.low_mids_pct],
+    ["M",    fb.mids_pct],
+    ["HM",   fb.high_mids_pct],
+    ["Hi",   fb.highs_pct],
+  ];
+  return (
+    <div className="stem-freq-mini">
+      {entries.map(([lbl, pct]) => (
+        <div key={lbl} className="stem-freq-mini-row">
+          <span className="stem-freq-mini-lbl">{lbl}</span>
+          <div className="stem-freq-mini-track">
+            <div className="stem-freq-mini-bar" style={{ width: `${pct}%`, background: color }} />
+          </div>
+          <span className="stem-freq-mini-val">{pct}%</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function StemAnalysisPanel({ stemAnalyses }) {
+  if (!stemAnalyses) return null;
+  const refStems = stemAnalyses.reference || {};
+  const wipStems = stemAnalyses.wip       || {};
+  const hasData  = STEM_ORDER.some((s) => refStems[s] || wipStems[s]);
+  if (!hasData) return null;
+
+  return (
+    <section className="stem-section">
+      <h2 className="section-title">Stem Analysis <span className="deep-badge">Deep</span></h2>
+      <div className="stem-grid">
+        {STEM_ORDER.map((stemKey) => {
+          const refS = refStems[stemKey];
+          const wipS = wipStems[stemKey];
+          if (!refS && !wipS) return null;
+          return (
+            <div key={stemKey} className="stem-card">
+              <div className="stem-card-header">{STEM_LABELS[stemKey]}</div>
+              <div className="stem-card-cols">
+                {[{ label: "Reference", data: refS, color: "#6c63ff" },
+                  { label: "WIP",       data: wipS, color: "#ff6584" }].map(({ label, data, color }) => (
+                  <div key={label} className="stem-card-col">
+                    <div className="stem-col-label" style={{ color }}>{label}</div>
+                    {data ? (
+                      <>
+                        <div className="stem-stat-row">
+                          <span className="stem-stat-lbl">Avg</span>
+                          <span className="stem-stat-val" style={{ color }}>{data.loudness.average_db} dBFS</span>
+                        </div>
+                        <div className="stem-stat-row">
+                          <span className="stem-stat-lbl">Peak</span>
+                          <span className="stem-stat-val" style={{ color }}>{data.loudness.peak_db} dBFS</span>
+                        </div>
+                        <div className="stem-stat-row">
+                          <span className="stem-stat-lbl">DR</span>
+                          <span className="stem-stat-val" style={{ color }}>{data.loudness.dynamic_range_db} dB</span>
+                        </div>
+                        <div className="stem-stat-row">
+                          <span className="stem-stat-lbl">Centroid</span>
+                          <span className="stem-stat-val" style={{ color }}>{Math.round(data.spectral_centroid_hz)} Hz</span>
+                        </div>
+                        <StemFreqMini fb={data.frequency_balance} color={color} />
+                      </>
+                    ) : (
+                      <span className="stem-absent">—</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 // ── Main app ───────────────────────────────────────────────────────────────
 
 // ── Markdown table renderer ────────────────────────────────────────────────
@@ -693,6 +780,8 @@ export default function App() {
   const [refAnalysis,    setRefAnalysis]    = useState(null);
   const [wipAnalysis,    setWipAnalysis]    = useState(null);
   const [priorityScores, setPriorityScores] = useState([]);
+  const [stemAnalyses,   setStemAnalyses]   = useState(null);
+  const [deepAnalysis,   setDeepAnalysis]   = useState(false);
   const [jobId,          setJobId]          = useState(null);
   const [error,          setError]          = useState("");
   const [elapsed,        setElapsed]        = useState(0);
@@ -749,12 +838,14 @@ export default function App() {
     setRefAnalysis(null);
     setWipAnalysis(null);
     setPriorityScores([]);
+    setStemAnalyses(null);
     setJobId(null);
     setError("");
 
     const formData = new FormData();
     validRefs.forEach((f) => formData.append("references", f));
     formData.append("wip", wipFile);
+    formData.append("deep_analysis", deepAnalysis ? "true" : "false");
 
     try {
       const res = await fetch("/analyze", { method: "POST", body: formData });
@@ -792,6 +883,7 @@ export default function App() {
             setWipAnalysis(data.result.wip);
             setSuggestions(data.result.suggestions);
             setPriorityScores(scores);
+            setStemAnalyses(data.result.stem_analyses || null);
             setStage("done");
             saveToHistory({
               id:              job_id,
@@ -883,17 +975,35 @@ export default function App() {
             />
           </div>
 
-          <button
-            className={`analyze-btn ${canAnalyze ? "active" : ""} ${isAnalyzing ? "loading" : ""}`}
-            onClick={handleAnalyze}
-            disabled={!canAnalyze}
-          >
-            {isAnalyzing ? (
-              <><span className="spinner" />{STAGE_LABELS[stage]}</>
-            ) : (
-              <><span className="btn-icon">✦</span>Run Analysis</>
-            )}
-          </button>
+          <div className="analyze-row">
+            <button
+              className={`analyze-btn ${canAnalyze ? "active" : ""} ${isAnalyzing ? "loading" : ""}`}
+              onClick={handleAnalyze}
+              disabled={!canAnalyze}
+            >
+              {isAnalyzing ? (
+                <><span className="spinner" />{STAGE_LABELS[stage]}</>
+              ) : (
+                <><span className="btn-icon">✦</span>Run Analysis</>
+              )}
+            </button>
+
+            <label className={`deep-toggle ${isAnalyzing ? "disabled" : ""}`}>
+              <input
+                type="checkbox"
+                checked={deepAnalysis}
+                onChange={(e) => !isAnalyzing && setDeepAnalysis(e.target.checked)}
+                disabled={isAnalyzing}
+              />
+              <span className="deep-toggle-track">
+                <span className="deep-toggle-thumb" />
+              </span>
+              <span className="deep-toggle-label">
+                Deep Analysis
+                <span className="deep-toggle-sub">Stem separation via Demucs · ~$0.009/run</span>
+              </span>
+            </label>
+          </div>
 
           {isAnalyzing && (
             <div className="analysis-progress">
@@ -945,6 +1055,7 @@ export default function App() {
                 <SectionComparisonPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
                 <WaveformChart refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
                 <SidechainPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
+                <StemAnalysisPanel stemAnalyses={stemAnalyses} />
               </>
             )}
           </section>

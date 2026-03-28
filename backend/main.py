@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 import tempfile
+import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, wait as cf_wait
 from datetime import datetime, timezone, timedelta
@@ -15,7 +16,7 @@ from typing import List
 import numpy as np
 import librosa
 import anthropic
-from fastapi import BackgroundTasks, FastAPI, File, Request, UploadFile, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, Form, Request, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -411,6 +412,194 @@ def analyze_audio(file_path: str) -> dict:
     }
 
 
+# ── Stem separation (Replicate + Supabase) ─────────────────────────────────
+
+_SUPABASE_BUCKET = "stems"
+_STEM_NAMES      = ["drums", "bass", "other"]
+
+
+def _get_supabase_client():
+    """Lazy init. Returns None if SUPABASE_URL / SUPABASE_SERVICE_KEY are unset."""
+    url = os.environ.get("SUPABASE_URL", "")
+    key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+    if not url or not key:
+        return None
+    from supabase import create_client  # noqa: PLC0415
+    return create_client(url, key)
+
+
+def _analyze_stem(path: str, stem_name: str) -> dict:
+    """Lightweight librosa analysis of a single separated stem file."""
+    y, sr = librosa.load(path, sr=22050, mono=True, duration=360)
+    hop_length = 512
+    stft  = np.abs(librosa.stft(y, hop_length=hop_length))
+    freqs = librosa.fft_frequencies(sr=sr)
+    freq_balance = _freq_balance_from_stft(stft, freqs)
+    rms     = librosa.feature.rms(y=y)[0]
+    avg_db  = float(20 * np.log10(np.mean(rms) + 1e-9))
+    peak_db = float(20 * np.log10(np.max(rms) + 1e-9))
+    dyn_db  = float(peak_db - (20 * np.log10(np.min(rms[rms > 0]) + 1e-9)))
+    centroid = float(np.mean(librosa.feature.spectral_centroid(y=y, sr=sr)[0]))
+    return {
+        "stem": stem_name,
+        "loudness": {
+            "average_db":       round(avg_db, 2),
+            "peak_db":          round(peak_db, 2),
+            "dynamic_range_db": round(dyn_db, 2),
+        },
+        "frequency_balance":    freq_balance,
+        "spectral_centroid_hz": round(centroid, 2),
+    }
+
+
+def _get_or_create_stems(file_path: str, file_hash: str) -> dict | None:
+    """
+    Return {stem_name: local_tmp_path} for drums / bass / other.
+    Checks Supabase Storage first (keyed by SHA-256 of the original file);
+    on cache-miss, runs ryan5453/demucs on Replicate and stores the result.
+    Returns None when env vars are missing or on unrecoverable error.
+    """
+    if not os.environ.get("REPLICATE_API_TOKEN", ""):
+        return None
+    sb = _get_supabase_client()
+    if sb is None:
+        return None
+
+    # ── 1. Try Supabase cache ──────────────────────────────────────────────
+    stem_paths: dict[str, str] = {}
+    try:
+        for stem in _STEM_NAMES:
+            data = sb.storage.from_(_SUPABASE_BUCKET).download(f"{file_hash}/{stem}.wav")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tf:
+                tf.write(data)
+                stem_paths[stem] = tf.name
+        if len(stem_paths) == len(_STEM_NAMES):
+            return stem_paths
+    except Exception:
+        for p in stem_paths.values():
+            try: os.unlink(p)
+            except: pass
+        stem_paths = {}
+
+    # ── 2. Upload original to Supabase for a signed URL Replicate can fetch ─
+    ext        = os.path.splitext(file_path)[1] or ".wav"
+    upload_key = f"uploads/{file_hash}{ext}"
+    try:
+        with open(file_path, "rb") as fh:
+            file_bytes = fh.read()
+        try:
+            sb.storage.from_(_SUPABASE_BUCKET).upload(
+                upload_key, file_bytes,
+                file_options={"content-type": "audio/mpeg", "upsert": "true"},
+            )
+        except Exception:
+            pass  # already exists is fine
+
+        signed = sb.storage.from_(_SUPABASE_BUCKET).create_signed_url(upload_key, expires_in=3600)
+        # SDK versions differ in the key name
+        audio_url = (
+            signed.get("signedURL")
+            or signed.get("signedUrl")
+            or (signed.get("data") or {}).get("signedUrl")
+            or (signed.get("data") or {}).get("signedURL")
+        )
+        if not audio_url:
+            return None
+    except Exception:
+        return None
+
+    # ── 3. Run Demucs on Replicate ─────────────────────────────────────────
+    try:
+        import replicate as _replicate  # noqa: PLC0415
+        output = _replicate.run("ryan5453/demucs", input={"audio": audio_url})
+    except Exception:
+        return None
+
+    # ── 4. Download stems and cache them in Supabase ───────────────────────
+    # output is typically {stem_name: FileOutput|url} but handle lists too
+    stem_url_map: dict[str, str] = {}
+    if isinstance(output, dict):
+        stem_url_map = {k: str(v) for k, v in output.items() if k in _STEM_NAMES}
+    elif hasattr(output, "__iter__"):
+        for item in output:
+            name = getattr(item, "name", None) or getattr(item, "stem", None)
+            if name and name in _STEM_NAMES:
+                stem_url_map[name] = str(item)
+
+    for stem in _STEM_NAMES:
+        url = stem_url_map.get(stem)
+        if not url:
+            continue
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tf:
+                stem_local = tf.name
+            urllib.request.urlretrieve(url, stem_local)
+            stem_paths[stem] = stem_local
+            with open(stem_local, "rb") as fh:
+                stem_bytes = fh.read()
+            try:
+                sb.storage.from_(_SUPABASE_BUCKET).upload(
+                    f"{file_hash}/{stem}.wav", stem_bytes,
+                    file_options={"content-type": "audio/wav", "upsert": "true"},
+                )
+            except Exception:
+                pass
+        except Exception:
+            continue
+
+    return stem_paths if stem_paths else None
+
+
+def _run_stem_analysis_pipeline(file_path: str, file_hash: str) -> dict:
+    """Fetch / create stems then run librosa on each in parallel. Returns {} on failure."""
+    stem_paths = _get_or_create_stems(file_path, file_hash)
+    if not stem_paths:
+        return {}
+    results: dict[str, dict] = {}
+    try:
+        with ThreadPoolExecutor(max_workers=len(stem_paths)) as pool:
+            futures = {stem: pool.submit(_analyze_stem, path, stem)
+                       for stem, path in stem_paths.items()}
+            for stem, fut in futures.items():
+                try:
+                    results[stem] = fut.result(timeout=120)
+                except Exception:
+                    pass
+    finally:
+        for p in stem_paths.values():
+            try: os.unlink(p)
+            except: pass
+    return results
+
+
+def _average_stem_analyses(analyses_list: list[dict]) -> dict:
+    """Average per-stem analysis dicts from multiple reference files."""
+    all_stems: set[str] = set()
+    for a in analyses_list:
+        all_stems.update(a.keys())
+    result: dict[str, dict] = {}
+    for stem in all_stems:
+        dicts = [a[stem] for a in analyses_list if stem in a]
+        if not dicts:
+            continue
+        n = len(dicts)
+        result[stem] = {
+            "stem": stem,
+            "loudness": {
+                k: round(sum(d["loudness"][k] for d in dicts) / n, 2)
+                for k in dicts[0]["loudness"]
+            },
+            "frequency_balance": {
+                k: round(sum(d["frequency_balance"][k] for d in dicts) / n, 1)
+                for k in dicts[0]["frequency_balance"]
+            },
+            "spectral_centroid_hz": round(
+                sum(d["spectral_centroid_hz"] for d in dicts) / n, 2
+            ),
+        }
+    return result
+
+
 # ── Analysis cache ─────────────────────────────────────────────────────────
 # Keyed by SHA-256 of file contents. Re-uploading the same audio file skips
 # all librosa work and returns the stored result instantly.
@@ -505,7 +694,44 @@ def _parse_priority_scores(text: str) -> list:
     return []
 
 
-def build_comparison_prompt(ref_analysis: dict, wip_analysis: dict, n_refs: int = 1) -> str:
+def _build_stem_prompt_section(ref_stems: dict | None, wip_stems: dict | None) -> str:
+    if not ref_stems and not wip_stems:
+        return ""
+
+    def _fmt(s: dict) -> str:
+        fb = s.get("frequency_balance", {})
+        return (
+            f"avg {s['loudness']['average_db']} dBFS | peak {s['loudness']['peak_db']} dBFS | "
+            f"DR {s['loudness']['dynamic_range_db']} dB | centroid {s['spectral_centroid_hz']} Hz | "
+            f"Sub {fb.get('sub_bass_pct','?')}% Bass {fb.get('bass_pct','?')}% "
+            f"LM {fb.get('low_mids_pct','?')}% M {fb.get('mids_pct','?')}% "
+            f"HM {fb.get('high_mids_pct','?')}% Hi {fb.get('highs_pct','?')}%"
+        )
+
+    lines = ["\n---\n## Stem Analysis (Deep Mode — Demucs separation)\n"]
+    for stem in _STEM_NAMES:
+        ref_s = (ref_stems or {}).get(stem)
+        wip_s = (wip_stems or {}).get(stem)
+        if ref_s or wip_s:
+            lines.append(f"\n**{stem.title()}**")
+            if ref_s:
+                lines.append(f"- Reference: {_fmt(ref_s)}")
+            if wip_s:
+                lines.append(f"- WIP:       {_fmt(wip_s)}")
+    lines.append(
+        "\nUse the stem-level data to give specific per-element feedback "
+        "(e.g. bass EQ, drum transient punch, arrangement level balance between stems)."
+    )
+    return "\n".join(lines)
+
+
+def build_comparison_prompt(
+    ref_analysis: dict,
+    wip_analysis: dict,
+    n_refs: int = 1,
+    ref_stems: dict | None = None,
+    wip_stems: dict | None = None,
+) -> str:
     ref_label = f"Averaged Target ({n_refs} references)" if n_refs > 1 else "Reference Track"
 
     def fmt_sections(analysis):
@@ -582,7 +808,7 @@ After the <priority_scores> block, provide your full analysis structured as:
 ### 🔧 Top 3 Priority Actions
 
 Be direct, technical, and specific. Use actual numbers from the analyses.
-"""
+""" + _build_stem_prompt_section(ref_stems, wip_stems)
 
 
 # ── Job store (disk-backed) ────────────────────────────────────────────────
@@ -629,7 +855,7 @@ def _cleanup_old_jobs() -> None:
             pass
 
 
-def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int) -> None:
+def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep_analysis: bool = False) -> None:
     """Blocking worker — FastAPI runs sync BackgroundTasks in a thread pool."""
     deadline = time.time() + _MAX_ANALYSIS_SECONDS
     try:
@@ -638,10 +864,22 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int) -> N
         _write_job(job_id, job)
 
         all_paths = ref_paths + [wip_path]
-        with ThreadPoolExecutor(max_workers=len(all_paths)) as pool:
-            futures_list = [pool.submit(_analyze_cached, p) for p in all_paths]
+
+        # Compute hashes up-front when stem caching is needed
+        all_hashes = [_file_hash(p) for p in all_paths] if deep_analysis else []
+
+        max_workers = len(all_paths) * (2 if deep_analysis else 1)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            analysis_futures = [pool.submit(_analyze_cached, p) for p in all_paths]
+            stem_futures = (
+                [pool.submit(_run_stem_analysis_pipeline, p, h)
+                 for p, h in zip(all_paths, all_hashes)]
+                if deep_analysis else []
+            )
+
+            all_futures = analysis_futures + stem_futures
             remaining = max(0.1, deadline - time.time())
-            done, not_done = cf_wait(futures_list, timeout=remaining)
+            done, not_done = cf_wait(all_futures, timeout=remaining)
             if not_done:
                 for f in not_done:
                     f.cancel()
@@ -649,11 +887,16 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int) -> N
                     "Audio analysis timed out after 10 minutes. "
                     "Please try a shorter or smaller audio file."
                 )
-            results = [f.result() for f in futures_list]
+            results      = [f.result() for f in analysis_futures]
+            stem_results = [f.result() for f in stem_futures] if stem_futures else [{} for _ in all_paths]
 
-        ref_analyses = results[: len(ref_paths)]
-        wip_analysis = results[-1]
-        ref_analysis = _average_analysis_dicts(ref_analyses)
+        ref_analyses   = results[: len(ref_paths)]
+        wip_analysis   = results[-1]
+        ref_analysis   = _average_analysis_dicts(ref_analyses)
+
+        ref_stem_list  = stem_results[: len(ref_paths)]
+        wip_stems      = stem_results[-1]
+        ref_stems      = _average_stem_analyses(ref_stem_list) if any(ref_stem_list) else {}
 
         if time.time() > deadline:
             raise TimeoutError(
@@ -664,7 +907,11 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int) -> N
         job["stage"] = "generating"
         _write_job(job_id, job)
 
-        prompt = build_comparison_prompt(ref_analysis, wip_analysis, n_refs=n_refs)
+        prompt = build_comparison_prompt(
+            ref_analysis, wip_analysis, n_refs=n_refs,
+            ref_stems=ref_stems or None,
+            wip_stems=wip_stems or None,
+        )
         client = anthropic.Anthropic()
         response = client.messages.create(
             model="claude-opus-4-6",
@@ -678,6 +925,10 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int) -> N
             r"<priority_scores>.*?</priority_scores>\s*", "", raw_text, flags=re.DOTALL
         ).strip()
 
+        stem_analyses_result = None
+        if deep_analysis and (ref_stems or wip_stems):
+            stem_analyses_result = {"reference": ref_stems, "wip": wip_stems}
+
         job.update({
             "status": "done",
             "stage":  "done",
@@ -687,6 +938,7 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int) -> N
                 "suggestions":     suggestions,
                 "priority_scores": priority_scores,
                 "n_refs":          n_refs,
+                "stem_analyses":   stem_analyses_result,
             },
         })
         _write_job(job_id, job)
@@ -715,6 +967,7 @@ async def analyze(
     background_tasks: BackgroundTasks,
     references: List[UploadFile] = File(...),
     wip: UploadFile = File(...),
+    deep_analysis: bool = Form(False),
 ):
     # Concurrency cap
     if not _job_semaphore.acquire(blocking=False):
@@ -782,7 +1035,7 @@ async def analyze(
     })
 
     # Background task owns the semaphore from here; it will release in its finally block
-    background_tasks.add_task(_run_analysis, job_id, ref_paths, wip_path, len(references))
+    background_tasks.add_task(_run_analysis, job_id, ref_paths, wip_path, len(references), deep_analysis)
     return {"job_id": job_id}
 
 
@@ -817,11 +1070,15 @@ def chat(job_id: str, request: ChatRequest):
         raise HTTPException(status_code=404, detail="Analysis not found or not yet complete")
 
     result = job["result"]
+    stem_ctx = ""
+    if result.get("stem_analyses"):
+        stem_ctx = f"\nSTEM ANALYSES (Demucs):\n{json.dumps(result['stem_analyses'], indent=2)}\n"
     system = (
         "You are an expert music producer and audio engineer assistant.\n"
         "The user has analyzed two tracks. Here is the full analysis data:\n\n"
         f"REFERENCE:\n{json.dumps(result['reference'], indent=2)}\n\n"
-        f"WIP:\n{json.dumps(result['wip'], indent=2)}\n\n"
+        f"WIP:\n{json.dumps(result['wip'], indent=2)}\n"
+        f"{stem_ctx}\n"
         f"AI FEEDBACK ALREADY PROVIDED:\n{result['suggestions']}\n\n"
         f"PRIORITY ISSUES:\n{json.dumps(result.get('priority_scores', []), indent=2)}\n\n"
         "Answer the user's follow-up questions concisely and technically. "

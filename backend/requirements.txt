@@ -8,3 +8,5 @@ numpy>=1.24.0
 anthropic>=0.40.0
 soundfile>=0.12.1
 slowapi>=0.1.9
+replicate>=0.25.0
+supabase>=2.0.0
