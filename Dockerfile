@@ -1,36 +1,39 @@
-FROM python:3.11-slim
+# ── Stage 1: Build React frontend ─────────────────────────────────────────
+FROM node:20-slim AS frontend-builder
 
-# Install Node.js (for building the React frontend)
+WORKDIR /app/frontend
+
+# Copy manifests first so this layer is cached unless deps change
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+RUN test -f dist/index.html   # catch silent build failures
+
+# ── Stage 2: Python runtime ────────────────────────────────────────────────
+# Node.js never reaches this stage — saves ~200 MB from the final image.
+FROM python:3.11-slim AS runtime
+
+# libsndfile1 — soundfile backend for WAV / FLAC / OGG
+# ffmpeg      — audioread backend for MP3 / M4A (absent before; would silently fail)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+        libsndfile1 \
+        ffmpeg \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python dependencies
 COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
-# Build the React frontend
-# Copy manifests first so npm ci is cached unless dependencies change
-COPY frontend/package.json frontend/package-lock.json ./frontend/
-RUN npm --prefix frontend ci
-
-# Now copy source (node_modules and dist are excluded via .dockerignore)
-COPY frontend/ ./frontend/
-RUN npm --prefix frontend run build
-# Verify the build produced index.html (catches silent build failures)
-RUN test -f frontend/dist/index.html
-
-# Copy backend source and startup script
 COPY backend/ ./backend/
+
+# Pull only the compiled assets — no source, no node_modules
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+
 COPY start.sh ./start.sh
 RUN chmod +x start.sh
 
 EXPOSE 8000
-
-# Use shell script so $PORT is always expanded by sh, whether Railway
-# injects it via the Dockerfile CMD or via its startCommand override.
 CMD ["sh", "start.sh"]

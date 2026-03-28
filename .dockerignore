@@ -1,9 +1,39 @@
+# Version control
+.git
+.gitignore
+
+# Frontend build artefacts — rebuilt in Stage 1
 frontend/node_modules
 frontend/dist
-__pycache__
+frontend/.vite
+
+# Python
 **/__pycache__
-*.pyc
-.env
+**/*.pyc
+**/*.pyo
+**/*.pyd
 .venv
 venv
+env
+
+# Secrets / local config
+.env
+.env.*
+
+# OS / editor
 .DS_Store
+Thumbs.db
+.idea
+.vscode
+*.swp
+*.swo
+
+# Logs & temp files
+*.log
+tmp/
+temp/
+
+# Test files (can be large audio samples)
+tests/
+test/
+**/*.test.*
