@@ -95,7 +95,11 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
         librosa.util.normalize(mfcc, axis=1),
     ])
 
-    bounds      = librosa.segment.agglomerative(features, 6)
+    # Scale target sections to track length: ~1 section per 45 s, clamped 4–8.
+    # Each track sizes independently so ref and WIP can have different counts.
+    duration_s = len(y) / sr
+    n_segs     = max(4, min(8, round(duration_s / 45)))
+    bounds      = librosa.segment.agglomerative(features, n_segs + 1)
     bound_times = librosa.frames_to_time(bounds, sr=sr, hop_length=hop_length)
 
     rms         = librosa.feature.rms(y=y, hop_length=hop_length)[0]

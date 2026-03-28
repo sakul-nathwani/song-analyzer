@@ -185,62 +185,106 @@ function PriorityScoresPanel({ scores }) {
 const FREQ_KEYS   = ["sub_bass_pct", "bass_pct", "low_mids_pct", "mids_pct", "high_mids_pct", "highs_pct"];
 const FREQ_LABELS = ["Sub", "Bass", "Lo-M", "Mids", "Hi-M", "Highs"];
 
+// EDM section types in display order
+const SECTION_ORDER = ["Intro", "Verse", "Buildup", "Drop", "Breakdown", "Outro"];
+
+function groupByLabel(sections) {
+  const groups = {};
+  for (const sec of (sections || [])) {
+    const l = sec.label;
+    if (!groups[l]) groups[l] = [];
+    groups[l].push(sec);
+  }
+  return groups;
+}
+
+function avgSections(secs) {
+  if (!secs || secs.length === 0) return null;
+  const n = secs.length;
+  const loudness = Math.round(
+    secs.reduce((s, sec) => s + (sec.avg_loudness_db || 0), 0) / n * 10
+  ) / 10;
+  const freq = {};
+  for (const key of FREQ_KEYS) {
+    freq[key] = Math.round(
+      secs.reduce((s, sec) => s + (sec.frequency_balance?.[key] || 0), 0) / n * 10
+    ) / 10;
+  }
+  return { loudness, freq, count: n };
+}
+
 function SectionComparisonPanel({ refAnalysis, wipAnalysis }) {
   if (!refAnalysis || !wipAnalysis) return null;
-  const refSecs = refAnalysis.sections || [];
-  const wipSecs = wipAnalysis.sections || [];
-  const maxLen  = Math.max(refSecs.length, wipSecs.length);
-  if (maxLen === 0) return null;
+
+  const refGroups = groupByLabel(refAnalysis.sections);
+  const wipGroups = groupByLabel(wipAnalysis.sections);
+
+  // All label types present in either track, in canonical EDM order
+  const allLabels = SECTION_ORDER.filter((l) => refGroups[l] || wipGroups[l]);
+  if (allLabels.length === 0) return null;
 
   return (
     <div className="section-comparison">
       <div className="freq-header">
-        <span className="freq-title">Section-by-Section Comparison</span>
+        <span className="freq-title">Section Type Comparison</span>
         <div className="freq-legend">
           <span className="legend-dot ref-dot" /> Reference
           <span className="legend-dot wip-dot" /> WIP
         </div>
       </div>
       <div className="section-cards">
-        {Array.from({ length: maxLen }).map((_, i) => {
-          const ref = refSecs[i];
-          const wip = wipSecs[i];
+        {allLabels.map((label) => {
+          const refAvg = avgSections(refGroups[label]);
+          const wipAvg = avgSections(wipGroups[label]);
+          const countMismatch = (refAvg?.count ?? 0) !== (wipAvg?.count ?? 0);
+
           return (
-            <div key={i} className="section-card">
-              <div className="section-card-idx">§{i + 1}</div>
-              <div className="section-card-meta">
-                {ref && <span className="ref-text section-meta-label">{ref.label}<span className="section-meta-time"> {ref.start}–{ref.end}s</span></span>}
-                {wip && <span className="wip-text section-meta-label">{wip.label}<span className="section-meta-time"> {wip.start}–{wip.end}s</span></span>}
-              </div>
-              <div className="section-loudness-row">
-                <span className="section-stat-lbl">Loudness</span>
-                <span className="ref-text">{ref ? `${ref.avg_loudness_db} dB` : "—"}</span>
-                <span className="wip-text">{wip ? `${wip.avg_loudness_db} dB` : "—"}</span>
-              </div>
-              {(ref?.frequency_balance || wip?.frequency_balance) && (
-                <div className="section-freq-grid">
-                  {FREQ_KEYS.map((key, ki) => {
-                    const rv = ref?.frequency_balance?.[key] ?? 0;
-                    const wv = wip?.frequency_balance?.[key] ?? 0;
-                    return (
-                      <div key={key} className="section-freq-row">
-                        <span className="section-freq-lbl">{FREQ_LABELS[ki]}</span>
-                        <div className="freq-bars">
-                          <div className="freq-bar-track">
-                            <div className="freq-bar ref-bar" style={{ width: `${rv}%` }} />
-                          </div>
-                          <div className="freq-bar-track">
-                            <div className="freq-bar wip-bar" style={{ width: `${wv}%` }} />
-                          </div>
-                        </div>
-                        <div className="freq-bar-values" style={{ minWidth: 70 }}>
-                          <span className="ref-text">{rv}%</span>
-                          <span className="wip-text">{wv}%</span>
-                        </div>
-                      </div>
-                    );
-                  })}
+            <div key={label} className="section-card">
+              <div className="section-type-header">
+                <span className="section-type-name">{label}</span>
+                <div className="section-type-counts">
+                  <span className="ref-text">Ref ×{refAvg?.count ?? 0}</span>
+                  <span className="wip-text">WIP ×{wipAvg?.count ?? 0}</span>
+                  {countMismatch && (
+                    <span className="count-mismatch" title="Count differs between tracks">⚠</span>
+                  )}
                 </div>
+              </div>
+
+              {!refAvg && <div className="section-absent wip-only">Missing in reference</div>}
+              {!wipAvg && <div className="section-absent wip-missing">Missing in WIP</div>}
+
+              {(refAvg || wipAvg) && (
+                <>
+                  <div className="section-loudness-row">
+                    <span className="section-stat-lbl">Avg Loudness</span>
+                    <span className="ref-text">{refAvg ? `${refAvg.loudness} dB` : "—"}</span>
+                    <span className="wip-text">{wipAvg ? `${wipAvg.loudness} dB` : "—"}</span>
+                  </div>
+                  <div className="section-freq-grid">
+                    {FREQ_KEYS.map((key, ki) => {
+                      const rv = refAvg?.freq?.[key] ?? 0;
+                      const wv = wipAvg?.freq?.[key] ?? 0;
+                      return (
+                        <div key={key} className="section-freq-row">
+                          <span className="section-freq-lbl">{FREQ_LABELS[ki]}</span>
+                          <div className="freq-bars">
+                            <div className="freq-bar-track">
+                              <div className="freq-bar ref-bar" style={{ width: `${rv}%` }} />
+                            </div>
+                            <div className="freq-bar-track">
+                              <div className="freq-bar wip-bar" style={{ width: `${wv}%` }} />
+                            </div>
+                          </div>
+                          <div className="freq-bar-values" style={{ minWidth: 70 }}>
+                            <span className="ref-text">{rv}%</span>
+                            <span className="wip-text">{wv}%</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
               )}
             </div>
           );
