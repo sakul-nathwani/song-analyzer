@@ -138,16 +138,44 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
 
     if section_energies:
         mean_e = float(np.mean(section_energies))
-        for i, (sec, e) in enumerate(zip(sections, section_energies)):
-            ratio = e / (mean_e + 1e-9)
-            if i == 0 and ratio < 0.55:
-                sec["label"] = "Pre-Intro / Buildup"
-                sec["is_low_energy"] = True
-            elif ratio >= 1.25:
-                sec["label"] = f"High-Energy Section {i + 1}"
-            elif ratio < 0.65:
-                sec["label"] = f"Low-Energy Section {i + 1}"
-                sec["is_low_energy"] = True
+        n      = len(sections)
+        labels = [""] * n
+
+        # Pass 1 — Intro: first section is low-energy
+        if section_energies[0] < mean_e * 0.65:
+            labels[0] = "Intro"
+
+        # Pass 1 — Outro: last section is low-energy (and there is more than one section)
+        if n > 1 and section_energies[-1] < mean_e * 0.65:
+            labels[-1] = "Outro"
+
+        # Pass 2 — Drop: any unlabeled section whose energy is well above average.
+        # A high spectral brightness (high-mids + highs > 25%) confirms a dense drop;
+        # the label is applied regardless since energy alone is the primary signal.
+        for i in range(n):
+            if labels[i]:
+                continue
+            if section_energies[i] >= mean_e * 1.2:
+                labels[i] = "Drop"
+
+        # Pass 3 — Buildup: unlabeled section immediately before a Drop
+        for i in range(n - 1):
+            if not labels[i] and labels[i + 1] == "Drop":
+                labels[i] = "Buildup"
+
+        # Pass 4 — Breakdown: unlabeled section immediately after a Drop
+        for i in range(1, n):
+            if not labels[i] and labels[i - 1] == "Drop":
+                labels[i] = "Breakdown"
+
+        # Pass 5 — everything else is a Verse
+        for i in range(n):
+            if not labels[i]:
+                labels[i] = "Verse"
+
+        for sec, e, label in zip(sections, section_energies, labels):
+            sec["label"]        = label
+            sec["is_low_energy"] = e < mean_e * 0.65
 
     return sections
 
@@ -335,7 +363,7 @@ IMPORTANT: Begin your response with a priority scores block, then the full markd
 {fmt_sections(wip_analysis)}
 
 ---
-Section note: "Pre-Intro / Buildup" or "Low-Energy Section" at start = quiet fade-in or riser. "High-Energy Section" = chorus/drop. Don't map section numbers directly to verse/chorus/bridge.
+Section note: labels are EDM-structure heuristics (Intro/Verse/Buildup/Drop/Breakdown/Outro) derived from relative energy and position. Treat them as starting context, not ground truth — reference actual energy and frequency values when giving feedback.
 
 ---
 After the <priority_scores> block, provide your full analysis structured as:
