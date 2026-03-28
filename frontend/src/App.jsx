@@ -307,7 +307,14 @@ function WaveformChart({ refAnalysis, wipAnalysis }) {
   const refP = refAnalysis.energy_profile;
   const wipP = wipAnalysis.energy_profile;
 
-  const maxTime = Math.max(refP.at(-1)?.time ?? 0, wipP.at(-1)?.time ?? 0, 1);
+  // Use actual audio duration so section markers near the end aren't clipped
+  const maxTime = Math.max(
+    refAnalysis.duration_seconds ?? 0,
+    wipAnalysis.duration_seconds ?? 0,
+    refP.at(-1)?.time ?? 0,
+    wipP.at(-1)?.time ?? 0,
+    1
+  );
   const maxEnergy = Math.max(...refP.map((p) => p.energy), ...wipP.map((p) => p.energy), 1e-9);
 
   const tx = (t) => (PL + (t / maxTime) * PW).toFixed(1);
@@ -359,21 +366,30 @@ function WaveformChart({ refAnalysis, wipAnalysis }) {
           <path d={fillPath(refP)} fill="rgba(108,99,255,0.07)" />
           <path d={fillPath(wipP)} fill="rgba(255,101,132,0.07)" />
 
-          {/* Section markers — WIP (pink) */}
-          {(wipAnalysis.sections ?? []).slice(1).map((sec, i) => (
-            <g key={`ws${i}`}>
-              <line x1={tx(sec.start)} y1={PT} x2={tx(sec.start)} y2={PT + PH}
-                stroke="rgba(255,101,132,0.3)" strokeWidth="1" strokeDasharray="3,3" />
-              <text x={Number(tx(sec.start)) + 3} y={PT + 10} fill="rgba(255,101,132,0.65)" fontSize="8.5">
-                {sec.label}
-              </text>
-            </g>
-          ))}
-
-          {/* Section markers — Ref (purple, no label to avoid clutter) */}
+          {/* Section markers — Ref (purple, lines only — drawn first so WIP labels sit on top) */}
           {(refAnalysis.sections ?? []).slice(1).map((sec, i) => (
             <line key={`rs${i}`} x1={tx(sec.start)} y1={PT} x2={tx(sec.start)} y2={PT + PH}
               stroke="rgba(108,99,255,0.2)" strokeWidth="1" strokeDasharray="3,3" />
+          ))}
+
+          {/* Section markers — WIP (pink lines + labels for every section) */}
+          {(wipAnalysis.sections ?? []).map((sec, i) => (
+            <g key={`ws${i}`}>
+              {/* Vertical boundary line for every section except the first (which starts at 0) */}
+              {i > 0 && (
+                <line x1={tx(sec.start)} y1={PT} x2={tx(sec.start)} y2={PT + PH}
+                  stroke="rgba(255,101,132,0.35)" strokeWidth="1" strokeDasharray="3,3" />
+              )}
+              {/* Label: first section pinned to the left plot edge, rest follow their start */}
+              <text
+                x={i === 0 ? PL + 3 : Number(tx(sec.start)) + 3}
+                y={PT + 10}
+                fill="rgba(255,101,132,0.7)"
+                fontSize="8.5"
+              >
+                {sec.label}
+              </text>
+            </g>
           ))}
 
           {/* Lines */}

@@ -184,41 +184,53 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
         n      = len(sections)
         labels = [""] * n
 
-        # Pass 1 — Intro: first section is low-energy
-        if section_energies[0] < mean_e * 0.65:
+        # Pass 1 — Intro: first section noticeably below average energy
+        if section_energies[0] < mean_e * 0.75:
             labels[0] = "Intro"
 
-        # Pass 1 — Outro: last section is low-energy (and there is more than one section)
-        if n > 1 and section_energies[-1] < mean_e * 0.65:
+        # Pass 1b — Outro: last section noticeably below average (needs ≥2 sections)
+        if n > 1 and section_energies[-1] < mean_e * 0.75:
             labels[-1] = "Outro"
 
-        # Pass 2 — Drop: any unlabeled section whose energy is well above average.
-        # A high spectral brightness (high-mids + highs > 25%) confirms a dense drop;
-        # the label is applied regardless since energy alone is the primary signal.
+        # Pass 2 — Drop: sustained high-energy section (energy ≥1.35× mean AND ≥20 s).
+        # Requiring duration filters out brief transient spikes that aren't true drops.
         for i in range(n):
             if labels[i]:
                 continue
-            if section_energies[i] >= mean_e * 1.2:
+            duration = sections[i]["end"] - sections[i]["start"]
+            if section_energies[i] >= mean_e * 1.35 and duration >= 20.0:
                 labels[i] = "Drop"
+
+        # If no drops found with strict criteria, relax only the duration guard
+        # (keeps the 1.35× energy threshold to stay selective)
+        if not any(lbl == "Drop" for lbl in labels):
+            for i in range(n):
+                if labels[i]:
+                    continue
+                if section_energies[i] >= mean_e * 1.25:
+                    labels[i] = "Drop"
 
         # Pass 3 — Buildup: unlabeled section immediately before a Drop
         for i in range(n - 1):
             if not labels[i] and labels[i + 1] == "Drop":
                 labels[i] = "Buildup"
 
-        # Pass 4 — Breakdown: unlabeled section immediately after a Drop
+        # Pass 4 — Breakdown: unlabeled section after a Drop that has clearly
+        # lower energy than that drop (not just any post-drop section).
         for i in range(1, n):
             if not labels[i] and labels[i - 1] == "Drop":
-                labels[i] = "Breakdown"
+                drop_e = section_energies[i - 1]
+                if section_energies[i] < drop_e * 0.82:
+                    labels[i] = "Breakdown"
 
-        # Pass 5 — everything else is a Verse
+        # Pass 5 — Verse: everything remaining
         for i in range(n):
             if not labels[i]:
                 labels[i] = "Verse"
 
         for sec, e, label in zip(sections, section_energies, labels):
-            sec["label"]        = label
-            sec["is_low_energy"] = e < mean_e * 0.65
+            sec["label"]         = label
+            sec["is_low_energy"] = e < mean_e * 0.75
 
     return sections
 
@@ -326,11 +338,21 @@ def analyze_audio(file_path: str) -> dict:
     frame_length  = 2048
     rms_over_time = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)[0]
     times         = librosa.frames_to_time(np.arange(len(rms_over_time)), sr=sr, hop_length=hop_length)
-    step          = max(1, len(rms_over_time) // 200)
-    energy_profile = [
-        {"time": round(float(t), 2), "energy": round(float(e), 6)}
-        for t, e in zip(times[::step], rms_over_time[::step])
-    ]
+
+    # Smooth energy profile: sliding window of ~3 s, step of ~1 s.
+    # This eliminates per-frame noise and produces a clean, readable curve.
+    fps            = sr / hop_length                        # frames per second (~43.1)
+    win_frames     = max(1, int(3.0 * fps))                 # 3-second averaging window
+    step_frames    = max(1, int(1.0 * fps))                 # 1 point per second
+    energy_profile = []
+    for i in range(0, len(rms_over_time), step_frames):
+        w_end       = min(i + win_frames, len(rms_over_time))
+        center_idx  = min(i + win_frames // 2, len(times) - 1)
+        avg_energy  = float(np.mean(rms_over_time[i:w_end]))
+        energy_profile.append({
+            "time":   round(float(times[center_idx]), 2),
+            "energy": round(avg_energy, 6),
+        })
 
     # Compute STFT once — reused for overall + per-section frequency analysis
     stft  = np.abs(librosa.stft(y, hop_length=hop_length))
