@@ -33,6 +33,52 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
+# ── Startup diagnostics ────────────────────────────────────────────────────
+def _log_env_diagnostics() -> None:
+    """Log which integration-related env vars are present (values redacted)."""
+    checks = {
+        "ANTHROPIC_API_KEY":    os.environ.get("ANTHROPIC_API_KEY", ""),
+        "REPLICATE_API_TOKEN":  os.environ.get("REPLICATE_API_TOKEN", ""),
+        "REPLICATE_API_KEY":    os.environ.get("REPLICATE_API_KEY", ""),
+        "REPLICATE_TOKEN":      os.environ.get("REPLICATE_TOKEN", ""),
+        "REPLICATE_KEY":        os.environ.get("REPLICATE_KEY", ""),
+        "SUPABASE_URL":         os.environ.get("SUPABASE_URL", ""),
+        "SUPABASE_SERVICE_KEY": os.environ.get("SUPABASE_SERVICE_KEY", ""),
+        "SUPABASE_ANON_KEY":    os.environ.get("SUPABASE_ANON_KEY", ""),
+    }
+    log.info("=== Environment variable diagnostics ===")
+    for name, val in checks.items():
+        if val:
+            # Show first 4 chars so you can confirm which token it is without leaking it
+            log.info("  %-25s SET  (starts with: %s...)", name, val[:4])
+        else:
+            log.info("  %-25s NOT SET", name)
+
+    # Also list every env var that contains "replicate" (case-insensitive)
+    replicate_vars = [k for k in os.environ if "replicate" in k.lower()]
+    if replicate_vars:
+        log.info("  All env vars containing 'replicate': %s", replicate_vars)
+    else:
+        log.info("  No env vars containing 'replicate' found at all")
+    log.info("========================================")
+
+_log_env_diagnostics()
+
+
+def _get_replicate_token() -> str:
+    """
+    Read the Replicate API token, trying all known variable names Railway
+    or other platforms might use.
+    """
+    for name in ("REPLICATE_API_TOKEN", "REPLICATE_API_KEY", "REPLICATE_TOKEN", "REPLICATE_KEY"):
+        val = os.environ.get(name, "")
+        if val:
+            if name != "REPLICATE_API_TOKEN":
+                log.info("[stems] Found Replicate token under '%s' instead of 'REPLICATE_API_TOKEN'", name)
+            return val
+    return ""
+
+
 # ── Rate limiter (per-IP, in-memory) ───────────────────────────────────────
 limiter = Limiter(key_func=get_remote_address)
 
@@ -521,9 +567,12 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> tuple[dict, str | No
     Checks Supabase Storage first (keyed by SHA-256); on cache-miss runs
     ryan5453/demucs on Replicate and stores results back in Supabase.
     """
-    replicate_token = os.environ.get("REPLICATE_API_TOKEN", "")
+    replicate_token = _get_replicate_token()
     if not replicate_token:
-        msg = "REPLICATE_API_TOKEN is not set — stem separation requires a Replicate API key"
+        msg = (
+            "No Replicate API token found — checked REPLICATE_API_TOKEN, REPLICATE_API_KEY, "
+            "REPLICATE_TOKEN, REPLICATE_KEY. Set one of these in your environment."
+        )
         log.warning("[stems] %s", msg)
         return {}, msg
 
@@ -594,9 +643,18 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> tuple[dict, str | No
     # ── 3. Run Demucs on Replicate ─────────────────────────────────────────
     try:
         import replicate as _replicate  # noqa: PLC0415
+        # The replicate SDK reads REPLICATE_API_TOKEN by default; if the token
+        # lives under a different variable name, pass it explicitly via the client.
         log.info("[stems] Submitting to Replicate (ryan5453/demucs) — this may take 1-3 minutes")
         t0 = time.time()
-        output = _replicate.run("ryan5453/demucs", input={"audio": audio_url})
+        client_kwargs = {}
+        if os.environ.get("REPLICATE_API_TOKEN", "") != replicate_token:
+            client_kwargs["api_token"] = replicate_token
+        if client_kwargs:
+            replicate_client = _replicate.Client(**client_kwargs)
+            output = replicate_client.run("ryan5453/demucs", input={"audio": audio_url})
+        else:
+            output = _replicate.run("ryan5453/demucs", input={"audio": audio_url})
         elapsed = time.time() - t0
         log.info("[stems] Replicate completed in %.1fs, output type=%s", elapsed, type(output).__name__)
         if isinstance(output, dict):
