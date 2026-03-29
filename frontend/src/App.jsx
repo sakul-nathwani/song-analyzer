@@ -333,45 +333,43 @@ function sectionChipColor(label) {
   return "#aaaacc";
 }
 
-function SectionEditor({ wipAnalysis, jobId, onConfirmed, onError }) {
-  const duration = wipAnalysis?.duration_seconds ?? 1;
-  const profile  = wipAnalysis?.energy_profile   ?? [];
+// Single-track interactive editor — used twice side-by-side inside SectionEditor
+function TrackSectionEditor({ trackLabel, accentColor, analysis, sections, setSections, locked, onLock, onUnlock }) {
+  const duration = analysis?.duration_seconds ?? 1;
+  const profile  = analysis?.energy_profile   ?? [];
 
-  const [sections, setSections] = useState(
-    () => (wipAnalysis?.sections ?? []).map((s, i) => ({ ...s, _key: i }))
-  );
-  const [dragIdx,    setDragIdx]    = useState(null);
-  const [editIdx,    setEditIdx]    = useState(null);
-  const [submitting, setSubmitting] = useState(false);
+  const [dragIdx, setDragIdx] = useState(null);
+  const [editIdx, setEditIdx] = useState(null);
   const svgRef = useRef(null);
 
-  // SVG coordinate constants (same as WaveformChart)
   const W = 860, H = 150;
-  const PL = 40, PR = 12, PT = 12, PB = 28;
+  const PL = 8, PR = 8, PT = 12, PB = 28;
   const PW = W - PL - PR;
   const PH = H - PT - PB;
 
-  const tx    = (t) => PL + (t / duration) * PW;
-  const ty    = (e) => PT + PH - (e / Math.max(...profile.map(p => p.energy), 1e-9)) * PH;
-  const x2t   = (x) => Math.max(0, Math.min(duration, (x - PL) / PW * duration));
-  const csx   = (cx) => {
+  const tx  = (t) => PL + (t / duration) * PW;
+  const x2t = (x) => Math.max(0, Math.min(duration, (x - PL) / PW * duration));
+  const csx = (cx) => {
     const r = svgRef.current?.getBoundingClientRect();
     return r ? (cx - r.left) / r.width * W : 0;
   };
 
-  // Global drag handlers
+  const maxE = Math.max(...profile.map(p => p.energy), 1e-9);
+  const tyE  = (e) => PT + PH - (e / maxE) * PH;
+
   useEffect(() => {
+    if (locked) return;
     const onUp = () => setDragIdx(null);
     const onMove = (e) => {
       if (dragIdx === null) return;
-      const r   = svgRef.current?.getBoundingClientRect();
+      const r = svgRef.current?.getBoundingClientRect();
       if (!r) return;
       const svgX = (e.clientX - r.left) / r.width * W;
       const t    = parseFloat(x2t(svgX).toFixed(1));
       setSections(prev => {
         const n  = prev.map(s => ({ ...s }));
-        const lo = dragIdx > 0              ? n[dragIdx - 1].start + 2 : 1;
-        const hi = dragIdx < n.length - 1  ? n[dragIdx + 1].start - 2 : duration - 1;
+        const lo = dragIdx > 0             ? n[dragIdx - 1].start + 2 : 1;
+        const hi = dragIdx < n.length - 1 ? n[dragIdx + 1].start - 2 : duration - 1;
         n[dragIdx] = { ...n[dragIdx], start: Math.max(lo, Math.min(hi, t)) };
         return n;
       });
@@ -382,10 +380,10 @@ function SectionEditor({ wipAnalysis, jobId, onConfirmed, onError }) {
       document.removeEventListener("mouseup",   onUp);
       document.removeEventListener("mousemove", onMove);
     };
-  }, [dragIdx, duration]);
+  }, [dragIdx, duration, locked]);
 
   const handleBgClick = (e) => {
-    if (dragIdx !== null) return;
+    if (locked || dragIdx !== null) return;
     if (editIdx !== null) { setEditIdx(null); return; }
     const svgX = csx(e.clientX);
     if (svgX < PL || svgX > W - PR) return;
@@ -414,7 +412,7 @@ function SectionEditor({ wipAnalysis, jobId, onConfirmed, onError }) {
   };
 
   const deleteSection = (idx) => {
-    if (sections.length <= 1) return;
+    if (locked || sections.length <= 1) return;
     setSections(prev => {
       const n = prev.map(s => ({ ...s }));
       if (idx > 0) n[idx - 1] = { ...n[idx - 1], end: n[idx].end };
@@ -424,38 +422,7 @@ function SectionEditor({ wipAnalysis, jobId, onConfirmed, onError }) {
     if (editIdx === idx) setEditIdx(null);
   };
 
-  const handleConfirm = async () => {
-    setSubmitting(true);
-    try {
-      const payload = sections.map((s, i) => ({
-        start:             s.start,
-        end:               i < sections.length - 1 ? sections[i + 1].start : duration,
-        label:             s.label,
-        avg_energy:        s.avg_energy        ?? 0,
-        avg_loudness_db:   s.avg_loudness_db   ?? -60,
-        frequency_balance: s.frequency_balance ?? {},
-        is_low_energy:     s.is_low_energy     ?? false,
-      }));
-      const res = await fetch(`/confirm-sections/${jobId}`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ wip_sections: payload }),
-      });
-      if (!res.ok) {
-        const b = await res.json().catch(() => ({}));
-        throw new Error(b.detail || `Error ${res.status}`);
-      }
-      onConfirmed();
-    } catch (err) {
-      setSubmitting(false);
-      onError(err.message);
-    }
-  };
-
-  // SVG paths
-  const maxE   = Math.max(...profile.map(p => p.energy), 1e-9);
-  const tyE    = (e) => PT + PH - (e / maxE) * PH;
-  const linePts = profile.map(p => `${tx(p.time).toFixed(1)},${tyE(p.energy).toFixed(1)}`).join(" L ");
+  const linePts  = profile.map(p => `${tx(p.time).toFixed(1)},${tyE(p.energy).toFixed(1)}`).join(" L ");
   const linePath = profile.length ? `M ${linePts}` : "";
   const fillPath = profile.length ? (() => {
     const y0 = (PT + PH).toFixed(1);
@@ -469,69 +436,62 @@ function SectionEditor({ wipAnalysis, jobId, onConfirmed, onError }) {
     xTicks.push({ x: tx(t).toFixed(1), lbl: m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${t}s` });
   }
 
+  const fillRgba  = accentColor === "purple" ? "rgba(108,99,255,0.10)"  : "rgba(255,101,132,0.08)";
+  const lineRgba  = accentColor === "purple" ? "rgba(108,99,255,0.55)"  : "rgba(255,101,132,0.45)";
+
   return (
-    <div className="section-editor">
-      <div className="se-header">
-        <div>
-          <div className="se-title">Review Sections</div>
-          <div className="se-subtitle">
-            Drag white boundary lines · click the chart to add a split · click a label to rename · × to delete
-          </div>
-        </div>
-        <button className="se-confirm-btn" onClick={handleConfirm} disabled={submitting}>
-          {submitting
-            ? <><span className="spinner" /> Analyzing…</>
-            : "Looks good, analyze →"}
-        </button>
+    <div className={`se-track ${locked ? "se-track--locked" : ""}`}>
+      <div className="se-track-header">
+        <span className="se-track-label" style={{ color: accentColor === "purple" ? "#8b85ff" : "#ff6584" }}>
+          {trackLabel}
+        </span>
+        {locked
+          ? <button className="se-track-btn se-track-btn--edit" onClick={onUnlock}>Edit</button>
+          : <button className="se-track-btn se-track-btn--confirm" onClick={onLock}>Confirm ✓</button>
+        }
       </div>
 
       <div className="se-chart-wrap" style={{ position: "relative" }}>
+        {locked && <div className="se-locked-overlay">✓ Confirmed</div>}
         <svg
           ref={svgRef}
           viewBox={`0 0 ${W} ${H}`}
           className="waveform-svg se-svg"
           preserveAspectRatio="none"
           style={{ display: "block", width: "100%", height: "auto",
-                   cursor: dragIdx !== null ? "ew-resize" : "default" }}
+                   cursor: locked ? "default" : dragIdx !== null ? "ew-resize" : "default",
+                   opacity: locked ? 0.55 : 1, transition: "opacity 0.2s" }}
         >
-          {/* Y grid */}
-          {[0.25, 0.5, 0.75, 1.0].map(pct => {
-            const y = tyE(maxE * pct).toFixed(1);
-            return (
-              <g key={pct}>
-                <line x1={PL} y1={y} x2={W - PR} y2={y}
-                  stroke="rgba(255,255,255,0.05)" strokeWidth="1" />
-                <text x={PL - 5} y={Number(y) + 4} textAnchor="end"
-                  fill="rgba(255,255,255,0.25)" fontSize="9">
-                  {Math.round(pct * 100)}%
-                </text>
-              </g>
-            );
-          })}
+          {/* Grid lines */}
+          {[0.25, 0.5, 0.75, 1.0].map(pct => (
+            <line key={pct}
+              x1={PL} y1={tyE(maxE * pct).toFixed(1)}
+              x2={W - PR} y2={tyE(maxE * pct).toFixed(1)}
+              stroke="rgba(255,255,255,0.05)" strokeWidth="1" />
+          ))}
 
           {/* Energy fill + line */}
-          <path d={fillPath} fill="rgba(255,101,132,0.08)" />
-          <path d={linePath} fill="none" stroke="rgba(255,101,132,0.45)" strokeWidth="1.5" />
+          <path d={fillPath} fill={fillRgba} />
+          <path d={linePath} fill="none" stroke={lineRgba} strokeWidth="1.5" />
 
           {/* Section shading */}
           {sections.map((s, i) => {
             const end = i < sections.length - 1 ? sections[i + 1].start : duration;
-            const col = sectionChipColor(s.label);
             return (
               <rect key={`sh${s._key}`}
                 x={tx(s.start).toFixed(1)} y={PT}
                 width={(tx(end) - tx(s.start)).toFixed(1)} height={PH}
-                fill={col} opacity="0.07"
-                style={{ pointerEvents: "none" }}
-              />
+                fill={sectionChipColor(s.label)} opacity="0.08"
+                style={{ pointerEvents: "none" }} />
             );
           })}
 
-          {/* Click-to-add background rect */}
-          <rect x={PL} y={PT} width={PW} height={PH}
-            fill="transparent" style={{ cursor: "crosshair" }}
-            onClick={handleBgClick}
-          />
+          {/* Click-to-add background */}
+          {!locked && (
+            <rect x={PL} y={PT} width={PW} height={PH}
+              fill="transparent" style={{ cursor: "crosshair" }}
+              onClick={handleBgClick} />
+          )}
 
           {/* Boundary lines + drag handles */}
           {sections.map((s, i) => {
@@ -541,67 +501,53 @@ function SectionEditor({ wipAnalysis, jobId, onConfirmed, onError }) {
             return (
               <g key={`bd${s._key}`}>
                 <line x1={x} y1={PT} x2={x} y2={PT + PH}
-                  stroke={active ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.5)"}
+                  stroke={active ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.45)"}
                   strokeWidth={active ? 2 : 1} />
-                <rect
-                  x={Number(x) - 7} y={PT} width={14} height={PH}
-                  fill="transparent"
-                  style={{ cursor: "ew-resize" }}
-                  onMouseDown={e => { e.stopPropagation(); setDragIdx(i); }}
-                  onClick={e => e.stopPropagation()}
-                />
+                {!locked && (
+                  <rect x={Number(x) - 7} y={PT} width={14} height={PH}
+                    fill="transparent" style={{ cursor: "ew-resize" }}
+                    onMouseDown={e => { e.stopPropagation(); setDragIdx(i); }}
+                    onClick={e => e.stopPropagation()} />
+                )}
               </g>
             );
           })}
 
-          {/* X axis ticks */}
+          {/* X ticks */}
           {xTicks.map(({ x, lbl }) => (
             <g key={x}>
               <line x1={x} y1={PT + PH} x2={x} y2={PT + PH + 4}
                 stroke="rgba(255,255,255,0.2)" strokeWidth="1" />
               <text x={x} y={PT + PH + 14} textAnchor="middle"
-                fill="rgba(255,255,255,0.3)" fontSize="9">
-                {lbl}
-              </text>
+                fill="rgba(255,255,255,0.3)" fontSize="9">{lbl}</text>
             </g>
           ))}
         </svg>
 
-        {/* HTML label overlays — position as % of SVG container */}
-        {sections.map((s, i) => {
-          const end       = i < sections.length - 1 ? sections[i + 1].start : duration;
-          const leftPct   = (tx(s.start) / W * 100).toFixed(2);
-          const widthPct  = ((tx(end) - tx(s.start)) / W * 100).toFixed(2);
-          const col       = sectionChipColor(s.label);
+        {/* Label overlays */}
+        {!locked && sections.map((s, i) => {
+          const end      = i < sections.length - 1 ? sections[i + 1].start : duration;
+          const leftPct  = (tx(s.start) / W * 100).toFixed(2);
+          const widthPct = ((tx(end) - tx(s.start)) / W * 100).toFixed(2);
+          const col      = sectionChipColor(s.label);
           return (
             <div key={`lbl${s._key}`} className="se-chip"
-              style={{ position: "absolute", left: `${leftPct}%`,
-                       width: `${widthPct}%`, top: "3px" }}>
+              style={{ position: "absolute", left: `${leftPct}%`, width: `${widthPct}%`, top: "3px" }}>
               {editIdx === i ? (
-                <select
-                  className="se-chip-select"
-                  value={s.label}
-                  autoFocus
+                <select className="se-chip-select" value={s.label} autoFocus
                   onChange={e => {
                     setSections(prev => prev.map((sec, si) =>
                       si === i ? { ...sec, label: e.target.value } : sec));
                     setEditIdx(null);
                   }}
                   onBlur={() => setEditIdx(null)}
-                  onClick={e => e.stopPropagation()}
-                >
-                  {EDITOR_LABEL_OPTIONS.map(opt =>
-                    <option key={opt} value={opt}>{opt}</option>)}
+                  onClick={e => e.stopPropagation()}>
+                  {EDITOR_LABEL_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                 </select>
               ) : (
-                <button
-                  className="se-chip-label"
-                  style={{ "--col": col }}
+                <button className="se-chip-label" style={{ "--col": col }}
                   onClick={e => { e.stopPropagation(); setEditIdx(i); }}
-                  title="Rename section"
-                >
-                  {s.label}
-                </button>
+                  title="Rename section">{s.label}</button>
               )}
               {sections.length > 1 && (
                 <button className="se-chip-del"
@@ -611,12 +557,132 @@ function SectionEditor({ wipAnalysis, jobId, onConfirmed, onError }) {
             </div>
           );
         })}
+
+        {/* Locked label overlay (read-only) */}
+        {locked && sections.map((s, i) => {
+          const end      = i < sections.length - 1 ? sections[i + 1].start : duration;
+          const leftPct  = (tx(s.start) / W * 100).toFixed(2);
+          const widthPct = ((tx(end) - tx(s.start)) / W * 100).toFixed(2);
+          const col      = sectionChipColor(s.label);
+          return (
+            <div key={`llbl${s._key}`} className="se-chip"
+              style={{ position: "absolute", left: `${leftPct}%`, width: `${widthPct}%`, top: "3px",
+                       pointerEvents: "none" }}>
+              <span className="se-chip-label se-chip-label--locked" style={{ "--col": col }}>
+                {s.label}
+              </span>
+            </div>
+          );
+        })}
       </div>
 
       <div className="se-footer">
         <span className="se-count">{sections.length} section{sections.length !== 1 ? "s" : ""}</span>
-        <span className="se-hint">Click chart to split · drag white lines to adjust · rename / delete below</span>
+        {!locked && (
+          <span className="se-hint">Click to split · drag lines to adjust · click label to rename</span>
+        )}
       </div>
+    </div>
+  );
+}
+
+// Wrapper: two tracks side by side
+function SectionEditor({ refAnalysis, wipAnalysis, jobId, onConfirmed, onError }) {
+  const [refSections, setRefSections] = useState(
+    () => (refAnalysis?.sections ?? []).map((s, i) => ({ ...s, _key: i }))
+  );
+  const [wipSections, setWipSections] = useState(
+    () => (wipAnalysis?.sections ?? []).map((s, i) => ({ ...s, _key: i }))
+  );
+  const [refLocked,  setRefLocked]  = useState(false);
+  const [wipLocked,  setWipLocked]  = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  const bothConfirmed = refLocked && wipLocked;
+
+  const serializeSections = (secs, analysis) => {
+    const dur = analysis?.duration_seconds ?? 1;
+    return secs.map((s, i) => ({
+      start:             s.start,
+      end:               i < secs.length - 1 ? secs[i + 1].start : dur,
+      label:             s.label,
+      avg_energy:        s.avg_energy        ?? 0,
+      avg_loudness_db:   s.avg_loudness_db   ?? -60,
+      frequency_balance: s.frequency_balance ?? {},
+      is_low_energy:     s.is_low_energy     ?? false,
+    }));
+  };
+
+  const handleAnalyze = async () => {
+    setSubmitting(true);
+    try {
+      const res = await fetch(`/confirm-sections/${jobId}`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          wip_sections: serializeSections(wipSections, wipAnalysis),
+          ref_sections: serializeSections(refSections, refAnalysis),
+        }),
+      });
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}));
+        throw new Error(b.detail || `Error ${res.status}`);
+      }
+      onConfirmed();
+    } catch (err) {
+      setSubmitting(false);
+      onError(err.message);
+    }
+  };
+
+  return (
+    <div className="section-editor">
+      <div className="se-header">
+        <div>
+          <div className="se-title">Review Sections</div>
+          <div className="se-subtitle">
+            Edit each track independently, then confirm both to generate AI feedback.
+          </div>
+        </div>
+        {bothConfirmed && (
+          <button className="se-confirm-btn" onClick={handleAnalyze} disabled={submitting}>
+            {submitting
+              ? <><span className="spinner" /> Analyzing…</>
+              : "Looks good, analyze →"}
+          </button>
+        )}
+      </div>
+
+      <div className="se-tracks-wrap">
+        <TrackSectionEditor
+          trackLabel="Reference"
+          accentColor="purple"
+          analysis={refAnalysis}
+          sections={refSections}
+          setSections={setRefSections}
+          locked={refLocked}
+          onLock={() => setRefLocked(true)}
+          onUnlock={() => setRefLocked(false)}
+        />
+        <TrackSectionEditor
+          trackLabel="WIP"
+          accentColor="pink"
+          analysis={wipAnalysis}
+          sections={wipSections}
+          setSections={setWipSections}
+          locked={wipLocked}
+          onLock={() => setWipLocked(true)}
+          onUnlock={() => setWipLocked(false)}
+        />
+      </div>
+
+      {!bothConfirmed && (
+        <div className="se-both-hint">
+          {!refLocked && !wipLocked && "Confirm both tracks above to continue"}
+          {refLocked && !wipLocked && "Reference confirmed — confirm the WIP track to continue"}
+          {!refLocked && wipLocked && "WIP confirmed — confirm the Reference track to continue"}
+        </div>
+      )}
     </div>
   );
 }
@@ -1421,6 +1487,7 @@ export default function App() {
         {/* Section Editor — shown after Phase 1, before AI analysis */}
         {isSectionReview && phase1Data?.wip_analysis && (
           <SectionEditor
+            refAnalysis={phase1Data.ref_analysis}
             wipAnalysis={phase1Data.wip_analysis}
             jobId={jobId}
             onConfirmed={handleSectionsConfirmed}

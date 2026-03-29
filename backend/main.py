@@ -1387,6 +1387,7 @@ def get_status(job_id: str):
 
 class ConfirmSectionsBody(BaseModel):
     wip_sections: list[dict]
+    ref_sections: list[dict] | None = None
 
 
 @app.post("/confirm-sections/{job_id}")
@@ -1405,8 +1406,10 @@ def confirm_sections(
     if not p1:
         raise HTTPException(status_code=409, detail="Phase 1 data missing — cannot confirm")
 
-    # Patch the wip sections with what the user confirmed
+    # Patch sections with what the user confirmed
     p1["wip_analysis"]["sections"] = body.wip_sections
+    if body.ref_sections is not None:
+        p1["ref_analysis"]["sections"] = body.ref_sections
     job["phase1"] = p1
     job["stage"]  = "generating"
     _write_job(job_id, job)
