@@ -546,6 +546,10 @@ def analyze_audio(file_path: str) -> dict:
 
 _STEM_NAMES = ["drums", "bass", "other"]
 
+# Only one Replicate prediction at a time — concurrent calls are rate-limited
+# on the free/hobbyist tier and cause the second call to fail silently.
+_replicate_sem = threading.Semaphore(1)
+
 
 def _analyze_stem(path: str, stem_name: str) -> dict:
     """Lightweight librosa analysis of a single separated stem file."""
@@ -593,22 +597,26 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> tuple[dict, str | No
     log.info("[stems] Starting stem pipeline for hash=%s", file_hash[:12])
 
     # ── 1. Run Demucs on Replicate, passing the file object directly ───────
+    # Serialise calls: Replicate free/hobbyist tier rate-limits concurrent
+    # predictions, causing a second simultaneous call to fail silently.
     try:
         import replicate as _replicate  # noqa: PLC0415
-        log.info("[stems] Submitting to Replicate (ryan5453/demucs) — this may take 1-3 minutes")
-        t0 = time.time()
-        # Pin the version hash so the SDK calls the prediction endpoint directly
-        # rather than resolving the latest version (which can itself 404).
-        MODEL = "ryan5453/demucs:5a7041cc9b82e5a558fea6b3d7b12dea89625e89da33f0447bd727c2d0ab9e77"
-        with open(file_path, "rb") as audio_fh:
-            if os.environ.get("REPLICATE_API_TOKEN", "") != replicate_token:
-                replicate_client = _replicate.Client(api_token=replicate_token)
-                output = replicate_client.run(MODEL, input={"audio": audio_fh})
-            else:
-                output = _replicate.run(MODEL, input={"audio": audio_fh})
-        elapsed = time.time() - t0
-        log.info("[stems] Replicate completed in %.1fs, output type=%s", elapsed, type(output).__name__)
-        log.info("[stems] Raw output: %r", str(output)[:300])
+        log.info("[stems] Waiting for Replicate semaphore (hash=%s)", file_hash[:12])
+        with _replicate_sem:
+            log.info("[stems] Submitting to Replicate (ryan5453/demucs) — this may take 1-3 minutes")
+            t0 = time.time()
+            # Pin the version hash so the SDK calls the prediction endpoint directly
+            # rather than resolving the latest version (which can itself 404).
+            MODEL = "ryan5453/demucs:5a7041cc9b82e5a558fea6b3d7b12dea89625e89da33f0447bd727c2d0ab9e77"
+            with open(file_path, "rb") as audio_fh:
+                if os.environ.get("REPLICATE_API_TOKEN", "") != replicate_token:
+                    replicate_client = _replicate.Client(api_token=replicate_token)
+                    output = replicate_client.run(MODEL, input={"audio": audio_fh})
+                else:
+                    output = _replicate.run(MODEL, input={"audio": audio_fh})
+            elapsed = time.time() - t0
+            log.info("[stems] Replicate completed in %.1fs, output type=%s", elapsed, type(output).__name__)
+            log.info("[stems] Raw output: %r", str(output)[:300])
     except Exception as exc:
         msg = f"Replicate API call failed: {exc}"
         log.error("[stems] %s", msg, exc_info=True)
@@ -1072,9 +1080,17 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
         # Summarise stem outcome
         stem_error_msg: str | None = None
         if deep_analysis:
-            if ref_stems or wip_stems:
+            if ref_stems and wip_stems:
                 log.info("[job %s] Stem separation succeeded — ref stems: %s, wip stems: %s",
                          job_id[:8], list(ref_stems.keys()), list(wip_stems.keys()))
+            elif ref_stems and not wip_stems:
+                stem_error_msg = (stem_errors[-1] if stem_errors else
+                                  "WIP stem separation produced no results")
+                log.warning("[job %s] WIP stem separation failed: %s", job_id[:8], stem_error_msg)
+            elif wip_stems and not ref_stems:
+                stem_error_msg = (stem_errors[0] if stem_errors else
+                                  "Reference stem separation produced no results")
+                log.warning("[job %s] Ref stem separation failed: %s", job_id[:8], stem_error_msg)
             else:
                 stem_error_msg = stem_errors[0] if stem_errors else "Stem separation produced no results"
                 log.warning("[job %s] Stem separation failed: %s", job_id[:8], stem_error_msg)
