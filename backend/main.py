@@ -178,6 +178,125 @@ def _freq_balance_from_stft(stft_slice: np.ndarray, freqs: np.ndarray) -> dict:
     }
 
 
+def _heuristic_label_sections(sections: list, energies: list) -> list:
+    """Energy-based EDM section labeler. Used as fallback when AI labeling fails."""
+    n      = len(sections)
+    labels = [""] * n
+    mean_e = float(np.mean(energies))
+
+    labels[0] = "Intro"
+
+    if n > 1 and energies[-1] < mean_e * 0.75:
+        labels[-1] = "Outro"
+
+    for i in range(n):
+        if labels[i]: continue
+        if sections[i]["start"] < 30.0: continue
+        duration = sections[i]["end"] - sections[i]["start"]
+        has_buildup_before = (
+            i > 0 and not labels[i - 1] and energies[i - 1] >= mean_e * 0.85
+        )
+        threshold = mean_e * 1.35 if has_buildup_before else mean_e * 1.50
+        if energies[i] >= threshold and duration >= 20.0:
+            labels[i] = "Drop"
+
+    if not any(l == "Drop" for l in labels):
+        for i in range(n):
+            if labels[i]: continue
+            if sections[i]["start"] < 30.0: continue
+            has_buildup_before = (
+                i > 0 and not labels[i - 1] and energies[i - 1] >= mean_e * 0.85
+            )
+            threshold = mean_e * 1.25 if has_buildup_before else mean_e * 1.40
+            if energies[i] >= threshold:
+                labels[i] = "Drop"
+
+    for i in range(n - 1):
+        if not labels[i] and labels[i + 1] == "Drop":
+            labels[i] = "Buildup"
+
+    for i in range(1, n):
+        if not labels[i] and labels[i - 1] == "Drop":
+            if energies[i] < energies[i - 1] * 0.82:
+                labels[i] = "Breakdown"
+
+    for i in range(n):
+        if not labels[i]:
+            labels[i] = "Verse"
+
+    return labels
+
+
+def _ai_label_sections(sections: list) -> list | None:
+    """
+    Ask Claude Haiku to label EDM sections from per-segment audio features.
+    Returns a list of label strings (same length as sections), or None on failure
+    so the caller can fall back to the heuristic.
+    """
+    if not os.environ.get("ANTHROPIC_API_KEY", ""):
+        return None
+
+    valid_labels = {"Intro", "Verse", "Buildup", "Drop", "Breakdown", "Outro"}
+
+    rows = []
+    for i, s in enumerate(sections):
+        fb      = s.get("frequency_balance", {})
+        sub_pct = fb.get("sub_bass_pct", "?")
+        hi_pct  = fb.get("highs_pct", "?")
+        rows.append(
+            f"  {i + 1}. {s['start']}s–{s['end']}s | "
+            f"energy={s['avg_energy']:.5f} | "
+            f"loudness={s.get('avg_loudness_db', '?')} dBFS | "
+            f"centroid={s.get('_centroid_hz', '?')} Hz | "
+            f"sub={sub_pct}% highs={hi_pct}% | "
+            f"onsets/s={s.get('_onset_rate', '?')}"
+        )
+
+    prompt = f"""You are an expert in EDM music structure. Label each segment.
+
+Valid labels (use exactly these): Intro, Verse, Buildup, Drop, Breakdown, Outro
+
+Key signatures:
+- Intro: opening, low-to-mid energy, sparse elements building in
+- Verse: mid energy, melodic/vocal content, stable
+- Buildup: energy/centroid/onsets rising toward peak, creates tension
+- Drop: peak energy, heavy sub-bass, punchy kick, arrives right after Buildup
+- Breakdown: energy drops sharply after Drop, atmospheric/stripped back
+- Outro: closing, energy tapering off toward silence
+
+Segments ({len(sections)}, total duration {sections[-1]["end"]}s):
+{chr(10).join(rows)}
+
+Respond with ONLY a JSON array of {len(sections)} labels, e.g. ["Intro","Buildup","Drop","Outro"]"""
+
+    try:
+        client   = anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text   = response.content[0].text.strip()
+        match  = re.search(r"\[.*?\]", text, re.DOTALL)
+        if not match:
+            log.warning("[sections] AI returned no JSON array: %s", text[:120])
+            return None
+        labels = json.loads(match.group())
+        if (
+            isinstance(labels, list)
+            and len(labels) == len(sections)
+            and all(l in valid_labels for l in labels)
+        ):
+            log.info("[sections] AI labels: %s", labels)
+            return labels
+        log.warning("[sections] AI labels invalid — count=%s expected=%d: %s",
+                    len(labels) if isinstance(labels, list) else "?", len(sections), labels)
+        return None
+    except Exception as exc:
+        log.warning("[sections] AI labeling failed (%s), falling back to heuristic", exc)
+        return None
+
+
 def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
     mfcc   = librosa.feature.mfcc(y=y, sr=sr, hop_length=hop_length, n_mfcc=13)
@@ -186,15 +305,21 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
         librosa.util.normalize(mfcc, axis=1),
     ])
 
-    # Scale target sections to track length: ~1 section per 45 s, clamped 4–8.
-    # Each track sizes independently so ref and WIP can have different counts.
+    # More segments than before: ~1 per 25 s, clamped 6–14.
+    # Finer granularity gives the AI (and heuristic fallback) more to work with,
+    # reducing the chance of a buildup+drop being merged into one blob.
     duration_s = len(y) / sr
-    n_segs     = max(4, min(8, round(duration_s / 45)))
-    bounds      = librosa.segment.agglomerative(features, n_segs + 1)
+    n_segs     = max(6, min(14, round(duration_s / 25)))
+    bounds     = librosa.segment.agglomerative(features, n_segs + 1)
     bound_times = librosa.frames_to_time(bounds, sr=sr, hop_length=hop_length)
 
     rms         = librosa.feature.rms(y=y, hop_length=hop_length)[0]
     frame_times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
+
+    # Pre-compute features used per-segment for AI labeling
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
+    centroid  = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)[0]
+    onset_threshold = float(np.mean(onset_env)) * 1.5
 
     sections         = []
     section_energies = []
@@ -206,22 +331,27 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
         avg_energy = float(np.mean(rms[mask])) if mask.any() else 0.0
         section_energies.append(avg_energy)
 
+        seg_dur    = max(end - start, 1e-3)
+        onset_rate = float(np.sum(onset_env[mask] > onset_threshold)) / seg_dur if mask.any() else 0.0
+        avg_centroid = float(np.mean(centroid[mask])) if mask.any() else 0.0
+
         sec = {
-            "start":      round(start, 2),
-            "end":        round(end, 2),
-            "avg_energy": round(avg_energy, 6),
-            "label":      f"Section {i + 1}",
+            "start":        round(start, 2),
+            "end":          round(end, 2),
+            "avg_energy":   round(avg_energy, 6),
+            "label":        f"Section {i + 1}",
             "is_low_energy": False,
+            # Internal keys stripped before returning — used only for AI prompt
+            "_centroid_hz": round(avg_centroid),
+            "_onset_rate":  round(onset_rate, 2),
         }
 
-        # Per-section frequency balance — free since STFT is already computed
         if stft is not None and freqs is not None:
             sf = max(0, librosa.time_to_frames(start, sr=sr, hop_length=hop_length))
             ef = min(stft.shape[1], librosa.time_to_frames(end, sr=sr, hop_length=hop_length))
             ef = max(ef, sf + 1)
             sec["frequency_balance"] = _freq_balance_from_stft(stft[:, sf:ef], freqs)
 
-        # Per-section loudness
         y_slice = y[int(start * sr):int(end * sr)]
         if len(y_slice) > 0:
             rms_s = librosa.feature.rms(y=y_slice)[0]
@@ -231,79 +361,15 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
 
         sections.append(sec)
 
-    if section_energies:
-        mean_e = float(np.mean(section_energies))
-        n      = len(sections)
-        labels = [""] * n
+    # Label: AI first, heuristic fallback
+    labels = _ai_label_sections(sections) or _heuristic_label_sections(sections, section_energies)
 
-        # Pass 0 — First section is ALWAYS Intro in EDM, regardless of energy.
-        # A track never opens with a Drop; a high-energy opener is still an intro.
-        labels[0] = "Intro"
-
-        # Pass 1 — Outro: last section clearly below average energy (≥2 sections needed)
-        if n > 1 and section_energies[-1] < mean_e * 0.75:
-            labels[-1] = "Outro"
-
-        # Pass 2 — Drop detection with three structural guards:
-        #   (a) must start ≥30 s into the song  — drops never open a track
-        #   (b) must be ≥20 s long              — filters transient spikes
-        #   (c) context-aware energy threshold:
-        #       · 1.35× mean when preceded by a plausible buildup (unlabeled section
-        #         with moderate energy ≥0.85× mean — it has "build" energy without
-        #         yet being a drop itself)
-        #       · 1.50× mean otherwise (more conservative without a clear buildup)
-        for i in range(n):
-            if labels[i]:
-                continue
-            if sections[i]["start"] < 30.0:
-                continue
-            duration = sections[i]["end"] - sections[i]["start"]
-            has_buildup_before = (
-                i > 0
-                and not labels[i - 1]
-                and section_energies[i - 1] >= mean_e * 0.85
-            )
-            threshold = mean_e * 1.35 if has_buildup_before else mean_e * 1.50
-            if section_energies[i] >= threshold and duration >= 20.0:
-                labels[i] = "Drop"
-
-        # Fallback: if still no drops, relax only the duration guard while keeping
-        # the position guard (≥30 s) and the context-aware energy thresholds.
-        if not any(lbl == "Drop" for lbl in labels):
-            for i in range(n):
-                if labels[i]:
-                    continue
-                if sections[i]["start"] < 30.0:
-                    continue
-                has_buildup_before = (
-                    i > 0
-                    and not labels[i - 1]
-                    and section_energies[i - 1] >= mean_e * 0.85
-                )
-                threshold = mean_e * 1.25 if has_buildup_before else mean_e * 1.40
-                if section_energies[i] >= threshold:
-                    labels[i] = "Drop"
-
-        # Pass 3 — Buildup: unlabeled section immediately before a Drop
-        for i in range(n - 1):
-            if not labels[i] and labels[i + 1] == "Drop":
-                labels[i] = "Buildup"
-
-        # Pass 4 — Breakdown: unlabeled section after a Drop with clearly lower energy
-        for i in range(1, n):
-            if not labels[i] and labels[i - 1] == "Drop":
-                drop_e = section_energies[i - 1]
-                if section_energies[i] < drop_e * 0.82:
-                    labels[i] = "Breakdown"
-
-        # Pass 5 — Verse: everything remaining
-        for i in range(n):
-            if not labels[i]:
-                labels[i] = "Verse"
-
-        for sec, e, label in zip(sections, section_energies, labels):
-            sec["label"]         = label
-            sec["is_low_energy"] = e < mean_e * 0.75
+    mean_e = float(np.mean(section_energies)) if section_energies else 1.0
+    for sec, energy, label in zip(sections, section_energies, labels):
+        sec["label"]         = label
+        sec["is_low_energy"] = energy < mean_e * 0.75
+        sec.pop("_centroid_hz", None)
+        sec.pop("_onset_rate",  None)
 
     return sections
 
