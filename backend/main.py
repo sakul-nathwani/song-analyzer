@@ -333,13 +333,20 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
         librosa.util.normalize(mfcc, axis=1),
     ])
 
-    # More segments than before: ~1 per 25 s, clamped 6–14.
-    # Finer granularity gives the AI (and heuristic fallback) more to work with,
-    # reducing the chance of a buildup+drop being merged into one blob.
     duration_s = len(y) / sr
-    n_segs     = max(6, min(14, round(duration_s / 25)))
-    bounds     = librosa.segment.agglomerative(features, n_segs + 1)
+
+    # Target ~1 segment per 15 s so short sections (16-bar buildups at 128 BPM
+    # are ~30 s) aren't swallowed into adjacent segments before the AI sees them.
+    # Floor: 8 segments for anything up to ~4 min so a typical
+    # Intro/Verse/Buildup/Drop/Breakdown/Verse/Buildup/Drop structure is always
+    # resolvable. Ceiling: 16 for longer tracks.
+    n_segs = max(8, min(16, round(duration_s / 15)))
+    log.info("[sections] duration=%.1fs → requesting %d segments from agglomerative", duration_s, n_segs)
+
+    bounds      = librosa.segment.agglomerative(features, n_segs + 1)
     bound_times = librosa.frames_to_time(bounds, sr=sr, hop_length=hop_length)
+    log.info("[sections] agglomerative returned %d boundaries → %d segments",
+             len(bound_times), len(bound_times) - 1)
 
     rms         = librosa.feature.rms(y=y, hop_length=hop_length)[0]
     frame_times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
@@ -388,6 +395,13 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
             sec["avg_loudness_db"] = -60.0
 
         sections.append(sec)
+
+    # Log segment durations so merging issues are visible in the server log
+    seg_summary = ", ".join(
+        f"{s['start']:.0f}–{s['end']:.0f}s ({s['end']-s['start']:.0f}s)"
+        for s in sections
+    )
+    log.info("[sections] %d segments before labeling: %s", len(sections), seg_summary)
 
     # Label: AI first, heuristic fallback
     labels = _ai_label_sections(sections) or _heuristic_label_sections(sections, section_energies)
