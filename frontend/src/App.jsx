@@ -823,6 +823,7 @@ export default function App() {
   const [priorityScores, setPriorityScores] = useState([]);
   const [stemAnalyses,   setStemAnalyses]   = useState(null);
   const [stemError,      setStemError]      = useState(null);
+  const [activeTab,      setActiveTab]      = useState("overview");
   const [deepAnalysis,   setDeepAnalysis]   = useState(false);
   const [jobId,          setJobId]          = useState(null);
   const [error,          setError]          = useState("");
@@ -886,6 +887,7 @@ export default function App() {
     setStemAnalyses(null);
     setStemError(null);
     setError("");
+    setActiveTab("overview");
   };
 
   const handleAnalyze = async () => {
@@ -900,6 +902,7 @@ export default function App() {
     setStemError(null);
     setJobId(null);
     setError("");
+    setActiveTab("overview");
 
     const formData = new FormData();
     validRefs.forEach((f) => formData.append("references", f));
@@ -1094,85 +1097,102 @@ export default function App() {
           <div className="error-box"><span className="error-icon">⚠️</span> {error}</div>
         )}
 
-        {/* Stem separation fallback warning */}
-        {stemError && stage === "done" && (
-          <div className="stem-error-box">
-            <span className="stem-error-icon">ⓘ</span>
-            <div>
-              <strong>Deep Analysis unavailable</strong> — regular analysis completed successfully.
-              <div className="stem-error-detail">{stemError}</div>
-            </div>
-          </div>
-        )}
-
-        {/* Priority scores */}
-        <PriorityScoresPanel scores={priorityScores} />
-
-        {/* Analysis cards + frequency comparison */}
-        {(refAnalysis || wipAnalysis) && stage !== "uploading" && (
-          <section className="results-section">
-            <h2 className="section-title">Audio Analysis</h2>
-            <div className="analysis-grid">
-              <AnalysisPanel analysis={refAnalysis} label={validRefs.length > 1 ? `Averaged Target (${validRefs.length} refs)` : "Reference Track"} color="#6c63ff" />
-              <AnalysisPanel analysis={wipAnalysis} label="Your WIP" color="#ff6584" />
+        {/* Tabbed results */}
+        {stage === "done" && refAnalysis && wipAnalysis && (
+          <section className="results-tabs-section">
+            <div className="tab-bar">
+              {[
+                { id: "overview",   label: "Overview"    },
+                { id: "frequency",  label: "Frequency"   },
+                { id: "stems",      label: "Stems"       },
+                { id: "feedback",   label: "AI Feedback" },
+              ].map(({ id, label }) => (
+                <button
+                  key={id}
+                  className={`tab-btn${activeTab === id ? " active" : ""}`}
+                  onClick={() => setActiveTab(id)}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
 
-            {refAnalysis && wipAnalysis && (
-              <>
-                <div className="freq-comparison">
-                  <div className="freq-header">
-                    <span className="freq-title">Overall Frequency Balance</span>
-                    <div className="freq-legend">
-                      <span className="legend-dot ref-dot" /> Reference
-                      <span className="legend-dot wip-dot" /> WIP
+            <div className="tab-panel">
+
+              {activeTab === "overview" && (
+                <>
+                  <PriorityScoresPanel scores={priorityScores} />
+                  <WaveformChart refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
+                  <SectionComparisonPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
+                </>
+              )}
+
+              {activeTab === "frequency" && (
+                <>
+                  <div className="analysis-grid">
+                    <AnalysisPanel analysis={refAnalysis} label={validRefs.length > 1 ? `Averaged Target (${validRefs.length} refs)` : "Reference Track"} color="#6c63ff" />
+                    <AnalysisPanel analysis={wipAnalysis} label="Your WIP" color="#ff6584" />
+                  </div>
+                  <div className="freq-comparison">
+                    <div className="freq-header">
+                      <span className="freq-title">Overall Frequency Balance</span>
+                      <div className="freq-legend">
+                        <span className="legend-dot ref-dot" /> Reference
+                        <span className="legend-dot wip-dot" /> WIP
+                      </div>
+                    </div>
+                    <div className="freq-bars-list">
+                      {freqLabels.map(([label, key]) => (
+                        <FreqBar
+                          key={key}
+                          label={label}
+                          refPct={refAnalysis.frequency_balance[key]}
+                          wipPct={wipAnalysis.frequency_balance[key]}
+                        />
+                      ))}
                     </div>
                   </div>
-                  <div className="freq-bars-list">
-                    {freqLabels.map(([label, key]) => (
-                      <FreqBar
-                        key={key}
-                        label={label}
-                        refPct={refAnalysis.frequency_balance[key]}
-                        wipPct={wipAnalysis.frequency_balance[key]}
-                      />
-                    ))}
+                </>
+              )}
+
+              {activeTab === "stems" && (
+                <>
+                  {stemError && (
+                    <div className="stem-error-box">
+                      <span className="stem-error-icon">ⓘ</span>
+                      <div>
+                        <strong>Deep Analysis unavailable</strong> — regular analysis completed successfully.
+                        <div className="stem-error-detail">{stemError}</div>
+                      </div>
+                    </div>
+                  )}
+                  {stemAnalyses ? (
+                    <StemAnalysisPanel stemAnalyses={stemAnalyses} />
+                  ) : !stemError && (
+                    <div className="tab-empty">
+                      <span className="tab-empty-icon">🎛️</span>
+                      <p>Enable <strong>Deep Analysis</strong> before running to see stem-level breakdown (vocals, drums, bass, other).</p>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {activeTab === "feedback" && (
+                <>
+                  <div className="suggestions-card">
+                    <div className="markdown-body">
+                      <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={MD_COMPONENTS}>
+                        {suggestions}
+                      </ReactMarkdown>
+                    </div>
                   </div>
-                </div>
-
-                <SectionComparisonPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
-                <WaveformChart refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
-<StemAnalysisPanel stemAnalyses={stemAnalyses} />
-              </>
-            )}
-          </section>
-        )}
-
-        {/* AI Suggestions */}
-        {(suggestions || stage === "generating") && (
-          <section className="suggestions-section">
-            <h2 className="section-title">
-              AI Production Feedback
-              {stage === "generating" && suggestions && (
-                <span className="streaming-indicator">
-                  <span className="pulse" /> generating...
-                </span>
+                  <ChatPanel jobId={jobId} />
+                </>
               )}
-            </h2>
-            <div className="suggestions-card">
-              {suggestions ? (
-                <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={MD_COMPONENTS}>{suggestions}</ReactMarkdown></div>
-              ) : (
-                <div className="suggestions-placeholder">
-                  <span className="spinner large" />
-                  <span>Waiting for AI feedback...</span>
-                </div>
-              )}
+
             </div>
           </section>
         )}
-
-        {/* Chat */}
-        {jobId && stage === "done" && <ChatPanel jobId={jobId} />}
       </main>
 
       <footer className="app-footer">

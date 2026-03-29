@@ -499,6 +499,65 @@ body {
 .ref-text { color: var(--purple); }
 .wip-text { color: var(--pink); }
 
+/* ── Tabs ── */
+.results-tabs-section {
+  margin-top: 32px;
+}
+
+.tab-bar {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 28px;
+}
+
+.tab-btn {
+  padding: 11px 22px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+.tab-btn:hover {
+  color: var(--text);
+}
+.tab-btn.active {
+  color: var(--text);
+  border-bottom-color: var(--purple);
+}
+
+.tab-panel {
+  min-height: 200px;
+}
+
+.tab-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 60px 24px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.tab-empty-icon {
+  font-size: 36px;
+  line-height: 1;
+}
+.tab-empty p {
+  font-size: 14px;
+  max-width: 320px;
+  line-height: 1.6;
+  margin: 0;
+}
+
 /* ── Suggestions ── */
 .suggestions-section {}
 
