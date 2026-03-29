@@ -179,163 +179,70 @@ def _freq_balance_from_stft(stft_slice: np.ndarray, freqs: np.ndarray) -> dict:
 
 
 def _heuristic_label_sections(sections: list, energies: list) -> list:
-    """Energy-based EDM section labeler. Used as fallback when AI labeling fails."""
-    n      = len(sections)
-    labels = [""] * n
-    mean_e = float(np.mean(energies))
+    """
+    Drop-focused labeler. Identifies sustained high-energy regions as Drops (Drop 1, Drop 2, …).
+    Everything else gets a generic label. Only the Drops are named precisely.
 
+    A "Drop" is a run of consecutive segments that all meet the energy threshold and
+    start after the first 20 s of the song (to exclude the intro region).
+    """
+    n = len(sections)
+    if n == 0:
+        return []
+
+    labels  = [""] * n
+    mean_e  = float(np.mean(energies))
+
+    # Energy threshold — a segment must exceed this to be a drop candidate.
+    # 1.25× the song mean filters out verses/buildups while catching typical drops.
+    DROP_THRESH = mean_e * 1.25
+    MIN_START   = 20.0   # ignore anything in the first 20 s (intro region)
+
+    # 1. Collect candidates: high-energy segments that start after the intro
+    candidates = [
+        i for i in range(n)
+        if energies[i] >= DROP_THRESH and sections[i]["start"] >= MIN_START
+    ]
+
+    # 2. Fallback: if nothing clears the threshold, pick the single loudest segment after 20 s
+    if not candidates:
+        after_intro = [i for i in range(n) if sections[i]["start"] >= MIN_START]
+        if after_intro:
+            candidates = [max(after_intro, key=lambda i: energies[i])]
+
+    # 3. Group consecutive candidates into runs (each run becomes one Drop)
+    runs: list[list[int]] = []
+    if candidates:
+        run = [candidates[0]]
+        for c in candidates[1:]:
+            if c == run[-1] + 1:
+                run.append(c)
+            else:
+                runs.append(run)
+                run = [c]
+        runs.append(run)
+
+    # 4. Sort runs by position and assign Drop labels
+    runs.sort(key=lambda r: sections[r[0]]["start"])
+    for drop_num, run in enumerate(runs, start=1):
+        for i in run:
+            labels[i] = f"Drop {drop_num}"
+
+    # 5. First section → Intro (overrides any spurious drop assignment)
     labels[0] = "Intro"
 
-    if n > 1 and energies[-1] < mean_e * 0.75:
+    # 6. Last section → Outro if it's low-energy
+    if n > 1 and not labels[-1] and energies[-1] < mean_e * 0.75:
         labels[-1] = "Outro"
 
-    # Rule: the highest-energy segment after the first 20 s is always Drop 1.
-    unlabeled_after_intro = [
-        i for i in range(n)
-        if not labels[i] and sections[i]["start"] >= 20.0
-    ]
-    drop_count = 0
-    if unlabeled_after_intro:
-        peak_idx = max(unlabeled_after_intro, key=lambda i: energies[i])
-        drop_count = 1
-        labels[peak_idx] = "Drop 1"
-
-        # Additional drops: other high-energy unlabeled segments (≥ 1.20× mean)
-        for i in range(n):
-            if labels[i]: continue
-            if sections[i]["start"] < 30.0: continue
-            if energies[i] >= mean_e * 1.20:
-                drop_count += 1
-                labels[i] = f"Drop {drop_count}"
-
-    buildup_count = 0
-    for i in range(n - 1):
-        if not labels[i] and labels[i + 1].startswith("Drop"):
-            buildup_count += 1
-            labels[i] = f"Buildup {buildup_count}"
-
-    # Enforce invariant: every Buildup must be immediately followed by a Drop.
-    # If the next section isn't already a Drop, force-assign it.
-    for i in range(n - 1):
-        if labels[i].startswith("Buildup") and not labels[i + 1].startswith("Drop"):
-            drop_count += 1
-            labels[i + 1] = f"Drop {drop_count}"
-
-    breakdown_count = 0
-    for i in range(1, n):
-        if not labels[i] and labels[i - 1].startswith("Drop"):
-            if energies[i] < energies[i - 1] * 0.82:
-                breakdown_count += 1
-                labels[i] = "Breakdown" if breakdown_count == 1 else f"Breakdown {breakdown_count}"
-
-    verse_count = 0
+    # 7. Everything unlabeled → generic "Section N"
+    section_count = 0
     for i in range(n):
         if not labels[i]:
-            verse_count += 1
-            labels[i] = f"Verse {verse_count}"
+            section_count += 1
+            labels[i] = f"Section {section_count}"
 
     return labels
-
-
-def _ai_label_sections(sections: list) -> list | None:
-    """
-    Ask Claude Haiku to label EDM sections from per-segment audio features.
-    Returns a list of label strings (same length as sections), or None on failure
-    so the caller can fall back to the heuristic.
-    """
-    if not os.environ.get("ANTHROPIC_API_KEY", ""):
-        return None
-
-    # Bases that must always carry a number (they repeat in a song)
-    _MUST_NUMBER = {"Verse", "Buildup", "Drop"}
-    _SECTION_BASES = {"Intro", "Verse", "Buildup", "Drop", "Breakdown", "Outro"}
-
-    def _valid_label(lbl: str) -> bool:
-        """Accept 'Intro', 'Drop 1', 'Verse 2', 'Breakdown', 'Breakdown 2', etc.
-        Verse / Buildup / Drop MUST have a numeric suffix."""
-        parts = lbl.rsplit(" ", 1)
-        base  = parts[0]
-        if base not in _SECTION_BASES:
-            return False
-        if len(parts) == 2 and not parts[1].isdigit():
-            return False
-        if base in _MUST_NUMBER and len(parts) == 1:
-            return False  # e.g. bare "Drop" / "Verse" are rejected
-        return True
-
-    rows = []
-    for i, s in enumerate(sections):
-        fb      = s.get("frequency_balance", {})
-        sub_pct = fb.get("sub_bass_pct", "?")
-        hi_pct  = fb.get("highs_pct", "?")
-        rows.append(
-            f"  {i + 1}. {s['start']}s–{s['end']}s | "
-            f"energy={s['avg_energy']:.5f} | "
-            f"loudness={s.get('avg_loudness_db', '?')} dBFS | "
-            f"centroid={s.get('_centroid_hz', '?')} Hz | "
-            f"sub={sub_pct}% highs={hi_pct}% | "
-            f"onsets/s={s.get('_onset_rate', '?')}"
-        )
-
-    prompt = f"""You are an expert in EDM music structure. Label each segment.
-
-CRITICAL ENERGY RULE:
-- The segment with the HIGHEST energy value is ALWAYS a Drop (Drop 1 if it is the first/only drop).
-- Buildups MUST show clearly rising energy leading into their Drop — if a segment precedes the
-  highest-energy segment and has rising energy, it is a Buildup.
-- Never label a segment "Drop" if it is not among the highest-energy segments.
-
-Numbering rules (REQUIRED — never omit the number for Verse/Buildup/Drop):
-- Intro and Outro appear once — no number (just "Intro", "Outro")
-- Verse, Buildup, Drop MUST always carry a number:
-  first Verse → "Verse 1", second → "Verse 2", third → "Verse 3"
-  first Buildup → "Buildup 1", second → "Buildup 2"
-  first Drop → "Drop 1", second → "Drop 2"
-- Breakdown: first → "Breakdown", subsequent → "Breakdown 2", "Breakdown 3"
-
-Typical EDM flow (not all sections required):
-Intro → Verse 1 → Buildup 1 → Drop 1 → Breakdown → Verse 2 → Buildup 2 → Drop 2 → Outro
-
-Key audio signatures:
-- Intro: opening, sparse, energy building in gradually
-- Verse N: stable mid-energy, melodic/vocal content
-- Buildup N: energy, centroid, and onset density all rising — creates tension before drop
-- Drop N: PEAK energy, heavy sub-bass, punchy kick — arrives immediately after Buildup
-- Breakdown/N: sharp energy drop after Drop, atmospheric or stripped-back
-- Outro: closing, energy tapering off to silence
-
-Segments ({len(sections)}, total duration {sections[-1]["end"]}s):
-{chr(10).join(rows)}
-
-Respond with ONLY a JSON array of {len(sections)} labels.
-Example: ["Intro","Verse 1","Buildup 1","Drop 1","Breakdown","Verse 2","Buildup 2","Drop 2","Outro"]"""
-
-    try:
-        client   = anthropic.Anthropic()
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=250,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text   = response.content[0].text.strip()
-        match  = re.search(r"\[.*?\]", text, re.DOTALL)
-        if not match:
-            log.warning("[sections] AI returned no JSON array: %s", text[:120])
-            return None
-        labels = json.loads(match.group())
-        if (
-            isinstance(labels, list)
-            and len(labels) == len(sections)
-            and all(_valid_label(l) for l in labels)
-        ):
-            log.info("[sections] AI labels: %s", labels)
-            return labels
-        log.warning("[sections] AI labels invalid — count=%s expected=%d: %s",
-                    len(labels) if isinstance(labels, list) else "?", len(sections), labels)
-        return None
-    except Exception as exc:
-        log.warning("[sections] AI labeling failed (%s), falling back to heuristic", exc)
-        return None
 
 
 def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
@@ -416,8 +323,7 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
     )
     log.info("[sections] %d segments before labeling: %s", len(sections), seg_summary)
 
-    # Label: AI first, heuristic fallback
-    labels = _ai_label_sections(sections) or _heuristic_label_sections(sections, section_energies)
+    labels = _heuristic_label_sections(sections, section_energies)
 
     mean_e = float(np.mean(section_energies)) if section_energies else 1.0
     for sec, energy, label in zip(sections, section_energies, labels):
@@ -1173,64 +1079,20 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
                 stem_error_msg = stem_errors[0] if stem_errors else "Stem separation produced no results"
                 log.warning("[job %s] Stem separation failed: %s", job_id[:8], stem_error_msg)
 
-        # ── Phase 1 complete: store intermediate data, pause for section review ──
-        stem_analyses_result = None
-        if deep_analysis and (ref_stems or wip_stems):
-            stem_analyses_result = {"reference": ref_stems, "wip": wip_stems}
-
-        log.info("[job %s] Phase 1 complete — awaiting section confirmation", job_id[:8])
-        job = _read_job(job_id) or {}
-        job["stage"]  = "section_review"
-        job["phase1"] = {
-            "ref_analysis":  ref_analysis,
-            "wip_analysis":  wip_analysis,
-            "n_refs":        n_refs,
-            "stem_analyses": stem_analyses_result,
-            "stem_error":    stem_error_msg,
-            "deadline":      deadline,
-        }
-        _write_job(job_id, job)
-
-    except Exception as exc:
-        job = _read_job(job_id) or {}
-        job.update({"status": "error", "error": str(exc)})
-        _write_job(job_id, job)
-
-    finally:
-        _job_semaphore.release()
-        for path in ref_paths + [wip_path]:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-
-
-def _run_ai_from_job(job_id: str) -> None:
-    """Phase 2 worker: reads phase1 data and generates AI feedback."""
-    try:
-        job = _read_job(job_id)
-        if not job or "phase1" not in job:
-            log.error("[job %s] _run_ai_from_job: phase1 data missing", job_id[:8])
-            return
-
-        p1             = job["phase1"]
-        ref_analysis   = p1["ref_analysis"]
-        wip_analysis   = p1["wip_analysis"]
-        n_refs         = p1["n_refs"]
-        stem_info      = p1.get("stem_analyses") or {}
-        ref_stems      = stem_info.get("reference") or {}
-        wip_stems      = stem_info.get("wip") or {}
-        stem_error_msg = p1.get("stem_error")
-        deadline       = p1.get("deadline", time.time() + _MAX_ANALYSIS_SECONDS)
-
+        # ── Generate AI feedback ─────────────────────────────────────────────
         if time.time() > deadline:
             raise TimeoutError(
-                "Analysis timed out before AI feedback could be generated. "
+                "Audio analysis timed out before AI feedback could be generated. "
                 "Please try again with a shorter audio file."
             )
 
+        job = _read_job(job_id) or {}
         job["stage"] = "generating"
         _write_job(job_id, job)
+
+        stem_analyses_result = None
+        if deep_analysis and (ref_stems or wip_stems):
+            stem_analyses_result = {"reference": ref_stems, "wip": wip_stems}
 
         prompt = build_comparison_prompt(
             ref_analysis, wip_analysis, n_refs=n_refs,
@@ -1250,11 +1112,7 @@ def _run_ai_from_job(job_id: str) -> None:
             r"<priority_scores>.*?</priority_scores>\s*", "", raw_text, flags=re.DOTALL
         ).strip()
 
-        stem_analyses_result = None
-        if ref_stems or wip_stems:
-            stem_analyses_result = {"reference": ref_stems, "wip": wip_stems}
-
-        log.info("[job %s] Phase 2 complete — writing result", job_id[:8])
+        log.info("[job %s] Analysis complete — writing result", job_id[:8])
         job.update({
             "status": "done",
             "stage":  "done",
@@ -1274,7 +1132,14 @@ def _run_ai_from_job(job_id: str) -> None:
         job = _read_job(job_id) or {}
         job.update({"status": "error", "error": str(exc)})
         _write_job(job_id, job)
-        log.error("[job %s] Phase 2 failed: %s", job_id[:8], exc)
+
+    finally:
+        _job_semaphore.release()
+        for path in ref_paths + [wip_path]:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
@@ -1366,56 +1231,14 @@ def get_status(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found or expired")
     # No auto-delete — job file must persist for the /chat endpoint.
     # TTL cleanup (_cleanup_old_jobs) handles removal after 1 hour.
-    result  = job["result"] or {}
-    p1      = job.get("phase1") or {}
-    # Expose phase1 analysis data only during section_review so frontend can render editor
-    phase1_out = None
-    if job.get("stage") == "section_review":
-        phase1_out = {
-            "ref_analysis": p1.get("ref_analysis"),
-            "wip_analysis": p1.get("wip_analysis"),
-        }
+    result = job["result"] or {}
     return {
         "status":     job["status"],
         "stage":      job["stage"],
         "result":     job["result"],
         "error":      job["error"],
         "stem_error": result.get("stem_error"),
-        "phase1":     phase1_out,
     }
-
-
-class ConfirmSectionsBody(BaseModel):
-    wip_sections: list[dict]
-    ref_sections: list[dict] | None = None
-
-
-@app.post("/confirm-sections/{job_id}")
-def confirm_sections(
-    job_id: str,
-    body: ConfirmSectionsBody,
-    background_tasks: BackgroundTasks,
-):
-    job = _read_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found or expired")
-    if job.get("stage") != "section_review":
-        raise HTTPException(status_code=409, detail="Job is not awaiting section confirmation")
-
-    p1 = job.get("phase1")
-    if not p1:
-        raise HTTPException(status_code=409, detail="Phase 1 data missing — cannot confirm")
-
-    # Patch sections with what the user confirmed
-    p1["wip_analysis"]["sections"] = body.wip_sections
-    if body.ref_sections is not None:
-        p1["ref_analysis"]["sections"] = body.ref_sections
-    job["phase1"] = p1
-    job["stage"]  = "generating"
-    _write_job(job_id, job)
-
-    background_tasks.add_task(_run_ai_from_job, job_id)
-    return {"status": "ok"}
 
 
 class ChatMessage(BaseModel):

@@ -126,23 +126,22 @@ function AnalysisPanel({ analysis, label, color }) {
 
 const STAGE_LABELS = {
   idle: null, uploading: "Uploading files...", extracting: "Extracting audio features...",
-  separating: "Separating stems via Demucs...", section_review: null,
+  separating: "Separating stems via Demucs...",
   generating: "Generating AI feedback...",
   done: null, error: null,
 };
 
 function ProgressSteps({ stage, deepAnalysis }) {
   const steps = [
-    { key: "uploading",      label: "Upload" },
-    { key: "extracting",     label: "Analyze Audio" },
+    { key: "uploading",  label: "Upload" },
+    { key: "extracting", label: "Analyze Audio" },
     ...(deepAnalysis ? [{ key: "separating", label: "Separate Stems" }] : []),
-    { key: "section_review", label: "Review Sections" },
-    { key: "generating",     label: "AI Feedback" },
+    { key: "generating", label: "AI Feedback" },
   ];
   const order = [
     "uploading", "extracting",
     ...(deepAnalysis ? ["separating"] : []),
-    "section_review", "generating", "done",
+    "generating", "done",
   ];
   const current = order.indexOf(stage);
   return (
@@ -313,17 +312,6 @@ function SectionComparisonPanel({ refAnalysis, wipAnalysis }) {
   );
 }
 
-// ── Section Editor ─────────────────────────────────────────────────────────
-
-const EDITOR_LABEL_OPTIONS = [
-  "Intro",
-  "Verse 1", "Verse 2", "Verse 3",
-  "Buildup 1", "Buildup 2", "Buildup 3",
-  "Drop 1", "Drop 2", "Drop 3",
-  "Breakdown", "Breakdown 2",
-  "Outro",
-];
-
 function sectionChipColor(label) {
   if (label.startsWith("Drop"))      return "#ff6584";
   if (label.startsWith("Buildup"))   return "#ffb347";
@@ -331,360 +319,6 @@ function sectionChipColor(label) {
   if (label === "Intro" || label === "Outro") return "#4ecdc4";
   if (label.startsWith("Breakdown")) return "#43d9ad";
   return "#aaaacc";
-}
-
-// Single-track interactive editor — used twice side-by-side inside SectionEditor
-function TrackSectionEditor({ trackLabel, accentColor, analysis, sections, setSections, locked, onLock, onUnlock }) {
-  const duration = analysis?.duration_seconds ?? 1;
-  const profile  = analysis?.energy_profile   ?? [];
-
-  const [dragIdx, setDragIdx] = useState(null);
-  const [editIdx, setEditIdx] = useState(null);
-  const svgRef = useRef(null);
-
-  const W = 860, H = 150;
-  const PL = 8, PR = 8, PT = 12, PB = 28;
-  const PW = W - PL - PR;
-  const PH = H - PT - PB;
-
-  const tx  = (t) => PL + (t / duration) * PW;
-  const x2t = (x) => Math.max(0, Math.min(duration, (x - PL) / PW * duration));
-  const csx = (cx) => {
-    const r = svgRef.current?.getBoundingClientRect();
-    return r ? (cx - r.left) / r.width * W : 0;
-  };
-
-  const maxE = Math.max(...profile.map(p => p.energy), 1e-9);
-  const tyE  = (e) => PT + PH - (e / maxE) * PH;
-
-  useEffect(() => {
-    if (locked) return;
-    const onUp = () => setDragIdx(null);
-    const onMove = (e) => {
-      if (dragIdx === null) return;
-      const r = svgRef.current?.getBoundingClientRect();
-      if (!r) return;
-      const svgX = (e.clientX - r.left) / r.width * W;
-      const t    = parseFloat(x2t(svgX).toFixed(1));
-      setSections(prev => {
-        const n  = prev.map(s => ({ ...s }));
-        const lo = dragIdx > 0             ? n[dragIdx - 1].start + 2 : 1;
-        const hi = dragIdx < n.length - 1 ? n[dragIdx + 1].start - 2 : duration - 1;
-        n[dragIdx] = { ...n[dragIdx], start: Math.max(lo, Math.min(hi, t)) };
-        return n;
-      });
-    };
-    document.addEventListener("mouseup",   onUp);
-    document.addEventListener("mousemove", onMove);
-    return () => {
-      document.removeEventListener("mouseup",   onUp);
-      document.removeEventListener("mousemove", onMove);
-    };
-  }, [dragIdx, duration, locked]);
-
-  const handleBgClick = (e) => {
-    if (locked || dragIdx !== null) return;
-    if (editIdx !== null) { setEditIdx(null); return; }
-    const svgX = csx(e.clientX);
-    if (svgX < PL || svgX > W - PR) return;
-    const t = x2t(svgX);
-    if (sections.some(s => Math.abs(s.start - t) < 3)) return;
-    const idx = sections.findIndex((s, i) => {
-      const end = i < sections.length - 1 ? sections[i + 1].start : duration;
-      return t > s.start && t < end;
-    });
-    if (idx < 0) return;
-    const sec    = sections[idx];
-    const secEnd = idx < sections.length - 1 ? sections[idx + 1].start : duration;
-    setSections(prev => {
-      const n = prev.map(s => ({ ...s }));
-      n[idx] = { ...sec, end: t };
-      n.splice(idx + 1, 0, {
-        start: t, end: secEnd, label: sec.label,
-        avg_energy: sec.avg_energy ?? 0,
-        avg_loudness_db: sec.avg_loudness_db ?? -60,
-        frequency_balance: sec.frequency_balance ?? {},
-        is_low_energy: false,
-        _key: Date.now(),
-      });
-      return n;
-    });
-  };
-
-  const deleteSection = (idx) => {
-    if (locked || sections.length <= 1) return;
-    setSections(prev => {
-      const n = prev.map(s => ({ ...s }));
-      if (idx > 0) n[idx - 1] = { ...n[idx - 1], end: n[idx].end };
-      n.splice(idx, 1);
-      return n;
-    });
-    if (editIdx === idx) setEditIdx(null);
-  };
-
-  const linePts  = profile.map(p => `${tx(p.time).toFixed(1)},${tyE(p.energy).toFixed(1)}`).join(" L ");
-  const linePath = profile.length ? `M ${linePts}` : "";
-  const fillPath = profile.length ? (() => {
-    const y0 = (PT + PH).toFixed(1);
-    return `M ${tx(profile[0].time).toFixed(1)},${y0} L ${linePts} L ${tx(profile.at(-1).time).toFixed(1)},${y0} Z`;
-  })() : "";
-
-  const tickInterval = duration > 180 ? 60 : 30;
-  const xTicks = [];
-  for (let t = 0; t <= duration; t += tickInterval) {
-    const m = Math.floor(t / 60), s = t % 60;
-    xTicks.push({ x: tx(t).toFixed(1), lbl: m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${t}s` });
-  }
-
-  const fillRgba  = accentColor === "purple" ? "rgba(108,99,255,0.10)"  : "rgba(255,101,132,0.08)";
-  const lineRgba  = accentColor === "purple" ? "rgba(108,99,255,0.55)"  : "rgba(255,101,132,0.45)";
-
-  return (
-    <div className={`se-track ${locked ? "se-track--locked" : ""}`}>
-      <div className="se-track-header">
-        <span className="se-track-label" style={{ color: accentColor === "purple" ? "#8b85ff" : "#ff6584" }}>
-          {trackLabel}
-        </span>
-        {locked
-          ? <button className="se-track-btn se-track-btn--edit" onClick={onUnlock}>Edit</button>
-          : <button className="se-track-btn se-track-btn--confirm" onClick={onLock}>Confirm ✓</button>
-        }
-      </div>
-
-      <div className="se-chart-wrap" style={{ position: "relative" }}>
-        {locked && <div className="se-locked-overlay">✓ Confirmed</div>}
-        <svg
-          ref={svgRef}
-          viewBox={`0 0 ${W} ${H}`}
-          className="waveform-svg se-svg"
-          preserveAspectRatio="none"
-          style={{ display: "block", width: "100%", height: "auto",
-                   cursor: locked ? "default" : dragIdx !== null ? "ew-resize" : "default",
-                   opacity: locked ? 0.55 : 1, transition: "opacity 0.2s" }}
-        >
-          {/* Grid lines */}
-          {[0.25, 0.5, 0.75, 1.0].map(pct => (
-            <line key={pct}
-              x1={PL} y1={tyE(maxE * pct).toFixed(1)}
-              x2={W - PR} y2={tyE(maxE * pct).toFixed(1)}
-              stroke="rgba(255,255,255,0.05)" strokeWidth="1" />
-          ))}
-
-          {/* Energy fill + line */}
-          <path d={fillPath} fill={fillRgba} />
-          <path d={linePath} fill="none" stroke={lineRgba} strokeWidth="1.5" />
-
-          {/* Section shading */}
-          {sections.map((s, i) => {
-            const end = i < sections.length - 1 ? sections[i + 1].start : duration;
-            return (
-              <rect key={`sh${s._key}`}
-                x={tx(s.start).toFixed(1)} y={PT}
-                width={(tx(end) - tx(s.start)).toFixed(1)} height={PH}
-                fill={sectionChipColor(s.label)} opacity="0.08"
-                style={{ pointerEvents: "none" }} />
-            );
-          })}
-
-          {/* Click-to-add background */}
-          {!locked && (
-            <rect x={PL} y={PT} width={PW} height={PH}
-              fill="transparent" style={{ cursor: "crosshair" }}
-              onClick={handleBgClick} />
-          )}
-
-          {/* Boundary lines + drag handles */}
-          {sections.map((s, i) => {
-            if (i === 0) return null;
-            const x  = tx(s.start).toFixed(1);
-            const active = dragIdx === i;
-            return (
-              <g key={`bd${s._key}`}>
-                <line x1={x} y1={PT} x2={x} y2={PT + PH}
-                  stroke={active ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.45)"}
-                  strokeWidth={active ? 2 : 1} />
-                {!locked && (
-                  <rect x={Number(x) - 7} y={PT} width={14} height={PH}
-                    fill="transparent" style={{ cursor: "ew-resize" }}
-                    onMouseDown={e => { e.stopPropagation(); setDragIdx(i); }}
-                    onClick={e => e.stopPropagation()} />
-                )}
-              </g>
-            );
-          })}
-
-          {/* X ticks */}
-          {xTicks.map(({ x, lbl }) => (
-            <g key={x}>
-              <line x1={x} y1={PT + PH} x2={x} y2={PT + PH + 4}
-                stroke="rgba(255,255,255,0.2)" strokeWidth="1" />
-              <text x={x} y={PT + PH + 14} textAnchor="middle"
-                fill="rgba(255,255,255,0.3)" fontSize="9">{lbl}</text>
-            </g>
-          ))}
-        </svg>
-
-        {/* Label overlays */}
-        {!locked && sections.map((s, i) => {
-          const end      = i < sections.length - 1 ? sections[i + 1].start : duration;
-          const leftPct  = (tx(s.start) / W * 100).toFixed(2);
-          const widthPct = ((tx(end) - tx(s.start)) / W * 100).toFixed(2);
-          const col      = sectionChipColor(s.label);
-          return (
-            <div key={`lbl${s._key}`} className="se-chip"
-              style={{ position: "absolute", left: `${leftPct}%`, width: `${widthPct}%`, top: "3px" }}>
-              {editIdx === i ? (
-                <select className="se-chip-select" value={s.label} autoFocus
-                  onChange={e => {
-                    setSections(prev => prev.map((sec, si) =>
-                      si === i ? { ...sec, label: e.target.value } : sec));
-                    setEditIdx(null);
-                  }}
-                  onBlur={() => setEditIdx(null)}
-                  onClick={e => e.stopPropagation()}>
-                  {EDITOR_LABEL_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                </select>
-              ) : (
-                <button className="se-chip-label" style={{ "--col": col }}
-                  onClick={e => { e.stopPropagation(); setEditIdx(i); }}
-                  title="Rename section">{s.label}</button>
-              )}
-              {sections.length > 1 && (
-                <button className="se-chip-del"
-                  onClick={e => { e.stopPropagation(); deleteSection(i); }}
-                  title="Delete section">×</button>
-              )}
-            </div>
-          );
-        })}
-
-        {/* Locked label overlay (read-only) */}
-        {locked && sections.map((s, i) => {
-          const end      = i < sections.length - 1 ? sections[i + 1].start : duration;
-          const leftPct  = (tx(s.start) / W * 100).toFixed(2);
-          const widthPct = ((tx(end) - tx(s.start)) / W * 100).toFixed(2);
-          const col      = sectionChipColor(s.label);
-          return (
-            <div key={`llbl${s._key}`} className="se-chip"
-              style={{ position: "absolute", left: `${leftPct}%`, width: `${widthPct}%`, top: "3px",
-                       pointerEvents: "none" }}>
-              <span className="se-chip-label se-chip-label--locked" style={{ "--col": col }}>
-                {s.label}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="se-footer">
-        <span className="se-count">{sections.length} section{sections.length !== 1 ? "s" : ""}</span>
-        {!locked && (
-          <span className="se-hint">Click to split · drag lines to adjust · click label to rename</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// Wrapper: two tracks side by side
-function SectionEditor({ refAnalysis, wipAnalysis, jobId, onConfirmed, onError }) {
-  const [refSections, setRefSections] = useState(
-    () => (refAnalysis?.sections ?? []).map((s, i) => ({ ...s, _key: i }))
-  );
-  const [wipSections, setWipSections] = useState(
-    () => (wipAnalysis?.sections ?? []).map((s, i) => ({ ...s, _key: i }))
-  );
-  const [refLocked,  setRefLocked]  = useState(false);
-  const [wipLocked,  setWipLocked]  = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-
-  const bothConfirmed = refLocked && wipLocked;
-
-  const serializeSections = (secs, analysis) => {
-    const dur = analysis?.duration_seconds ?? 1;
-    return secs.map((s, i) => ({
-      start:             s.start,
-      end:               i < secs.length - 1 ? secs[i + 1].start : dur,
-      label:             s.label,
-      avg_energy:        s.avg_energy        ?? 0,
-      avg_loudness_db:   s.avg_loudness_db   ?? -60,
-      frequency_balance: s.frequency_balance ?? {},
-      is_low_energy:     s.is_low_energy     ?? false,
-    }));
-  };
-
-  const handleAnalyze = async () => {
-    setSubmitting(true);
-    try {
-      const res = await fetch(`/confirm-sections/${jobId}`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({
-          wip_sections: serializeSections(wipSections, wipAnalysis),
-          ref_sections: serializeSections(refSections, refAnalysis),
-        }),
-      });
-      if (!res.ok) {
-        const b = await res.json().catch(() => ({}));
-        throw new Error(b.detail || `Error ${res.status}`);
-      }
-      onConfirmed();
-    } catch (err) {
-      setSubmitting(false);
-      onError(err.message);
-    }
-  };
-
-  return (
-    <div className="section-editor">
-      <div className="se-header">
-        <div>
-          <div className="se-title">Review Sections</div>
-          <div className="se-subtitle">
-            Edit each track independently, then confirm both to generate AI feedback.
-          </div>
-        </div>
-        {bothConfirmed && (
-          <button className="se-confirm-btn" onClick={handleAnalyze} disabled={submitting}>
-            {submitting
-              ? <><span className="spinner" /> Analyzing…</>
-              : "Looks good, analyze →"}
-          </button>
-        )}
-      </div>
-
-      <div className="se-tracks-wrap">
-        <TrackSectionEditor
-          trackLabel="Reference"
-          accentColor="purple"
-          analysis={refAnalysis}
-          sections={refSections}
-          setSections={setRefSections}
-          locked={refLocked}
-          onLock={() => setRefLocked(true)}
-          onUnlock={() => setRefLocked(false)}
-        />
-        <TrackSectionEditor
-          trackLabel="WIP"
-          accentColor="pink"
-          analysis={wipAnalysis}
-          sections={wipSections}
-          setSections={setWipSections}
-          locked={wipLocked}
-          onLock={() => setWipLocked(true)}
-          onUnlock={() => setWipLocked(false)}
-        />
-      </div>
-
-      {!bothConfirmed && (
-        <div className="se-both-hint">
-          {!refLocked && !wipLocked && "Confirm both tracks above to continue"}
-          {refLocked && !wipLocked && "Reference confirmed — confirm the WIP track to continue"}
-          {!refLocked && wipLocked && "WIP confirmed — confirm the Reference track to continue"}
-        </div>
-      )}
-    </div>
-  );
 }
 
 // ── Waveform chart (SVG energy envelope) ──────────────────────────────────
@@ -1189,7 +823,6 @@ export default function App() {
   const [priorityScores, setPriorityScores] = useState([]);
   const [stemAnalyses,   setStemAnalyses]   = useState(null);
   const [stemError,      setStemError]      = useState(null);
-  const [phase1Data,     setPhase1Data]     = useState(null);
   const [deepAnalysis,   setDeepAnalysis]   = useState(false);
   const [jobId,          setJobId]          = useState(null);
   const [error,          setError]          = useState("");
@@ -1206,8 +839,7 @@ export default function App() {
 
   const setStage = (s) => { stageRef.current = s; setStageState(s); };
 
-  const isAnalyzing    = stage === "uploading" || stage === "extracting" || stage === "separating" || stage === "generating";
-  const isSectionReview = stage === "section_review";
+  const isAnalyzing = stage === "uploading" || stage === "extracting" || stage === "separating" || stage === "generating";
 
   useEffect(() => {
     if (isAnalyzing) {
@@ -1227,7 +859,7 @@ export default function App() {
   const setRefAt  = (i, file) => { const updated = [...refFiles]; updated[i] = file; setRefFiles(updated); };
 
   const validRefs  = refFiles.filter(Boolean);
-  const canAnalyze = validRefs.length > 0 && wipFile && !isAnalyzing && !isSectionReview;
+  const canAnalyze = validRefs.length > 0 && wipFile && !isAnalyzing;
 
   const saveToHistory = (entry) => {
     const next = [entry, ...history].slice(0, 20);
@@ -1291,14 +923,6 @@ export default function App() {
             setStage("generating");
           }
 
-          // Phase 1 complete — stop polling and show section editor
-          if (data.stage === "section_review" && stageRef.current !== "section_review") {
-            clearInterval(pollRef.current);
-            setPhase1Data(data.phase1);
-            setStage("section_review");
-            return;
-          }
-
           if (data.status === "done") {
             clearInterval(pollRef.current);
             const scores = data.result.priority_scores || [];
@@ -1332,47 +956,6 @@ export default function App() {
       setStage("error");
     }
   };
-
-  // Called by SectionEditor after a successful POST /confirm-sections
-  const handleSectionsConfirmed = useCallback(() => {
-    setStage("generating");
-    clearInterval(pollRef.current);
-    pollRef.current = setInterval(async () => {
-      try {
-        const statusRes = await fetch(`/status/${jobId}`);
-        if (!statusRes.ok) {
-          let msg = `Status check failed (${statusRes.status})`;
-          try { const b = await statusRes.json(); msg = b.detail || msg; } catch {}
-          throw new Error(msg);
-        }
-        const data = await statusRes.json();
-        if (data.stage === "generating" && stageRef.current !== "generating") setStage("generating");
-        if (data.status === "done") {
-          clearInterval(pollRef.current);
-          const scores = data.result.priority_scores || [];
-          setRefAnalysis(data.result.reference);
-          setWipAnalysis(data.result.wip);
-          setSuggestions(data.result.suggestions);
-          setPriorityScores(scores);
-          setStemAnalyses(data.result.stem_analyses || null);
-          setStemError(data.stem_error || data.result?.stem_error || null);
-          setStage("done");
-          saveToHistory({
-            id: jobId, timestamp: new Date().toISOString(),
-            wip_name: wipFile.name, ref_names: validRefs.map(f => f.name),
-            priority_scores: scores, job_id: jobId,
-          });
-        } else if (data.status === "error") {
-          clearInterval(pollRef.current);
-          throw new Error(data.error || "Analysis failed on server");
-        }
-      } catch (pollErr) {
-        clearInterval(pollRef.current);
-        setError(pollErr.message);
-        setStage("error");
-      }
-    }, 3000);
-  }, [jobId, wipFile, validRefs]);
 
   return (
     <div className="app">
@@ -1470,7 +1053,7 @@ export default function App() {
             </label>
           </div>
 
-          {(isAnalyzing || isSectionReview) && (
+          {isAnalyzing && (
             <div className="analysis-progress">
               <ProgressSteps stage={stage} deepAnalysis={deepAnalysis} />
               {isAnalyzing && (
@@ -1484,16 +1067,6 @@ export default function App() {
           )}
         </section>
 
-        {/* Section Editor — shown after Phase 1, before AI analysis */}
-        {isSectionReview && phase1Data?.wip_analysis && (
-          <SectionEditor
-            refAnalysis={phase1Data.ref_analysis}
-            wipAnalysis={phase1Data.wip_analysis}
-            jobId={jobId}
-            onConfirmed={handleSectionsConfirmed}
-            onError={(msg) => { setError(msg); setStage("error"); }}
-          />
-        )}
 
         {/* Error */}
         {stage === "error" && (
