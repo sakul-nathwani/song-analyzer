@@ -189,28 +189,22 @@ def _heuristic_label_sections(sections: list, energies: list) -> list:
     if n > 1 and energies[-1] < mean_e * 0.75:
         labels[-1] = "Outro"
 
+    # Rule: the highest-energy segment after the first 20 s is always Drop 1.
+    unlabeled_after_intro = [
+        i for i in range(n)
+        if not labels[i] and sections[i]["start"] >= 20.0
+    ]
     drop_count = 0
-    for i in range(n):
-        if labels[i]: continue
-        if sections[i]["start"] < 30.0: continue
-        duration = sections[i]["end"] - sections[i]["start"]
-        has_buildup_before = (
-            i > 0 and not labels[i - 1] and energies[i - 1] >= mean_e * 0.85
-        )
-        threshold = mean_e * 1.35 if has_buildup_before else mean_e * 1.50
-        if energies[i] >= threshold and duration >= 20.0:
-            drop_count += 1
-            labels[i] = f"Drop {drop_count}"
+    if unlabeled_after_intro:
+        peak_idx = max(unlabeled_after_intro, key=lambda i: energies[i])
+        drop_count = 1
+        labels[peak_idx] = "Drop 1"
 
-    if drop_count == 0:
+        # Additional drops: other high-energy unlabeled segments (≥ 1.20× mean)
         for i in range(n):
             if labels[i]: continue
             if sections[i]["start"] < 30.0: continue
-            has_buildup_before = (
-                i > 0 and not labels[i - 1] and energies[i - 1] >= mean_e * 0.85
-            )
-            threshold = mean_e * 1.25 if has_buildup_before else mean_e * 1.40
-            if energies[i] >= threshold:
+            if energies[i] >= mean_e * 1.20:
                 drop_count += 1
                 labels[i] = f"Drop {drop_count}"
 
@@ -219,6 +213,13 @@ def _heuristic_label_sections(sections: list, energies: list) -> list:
         if not labels[i] and labels[i + 1].startswith("Drop"):
             buildup_count += 1
             labels[i] = f"Buildup {buildup_count}"
+
+    # Enforce invariant: every Buildup must be immediately followed by a Drop.
+    # If the next section isn't already a Drop, force-assign it.
+    for i in range(n - 1):
+        if labels[i].startswith("Buildup") and not labels[i + 1].startswith("Drop"):
+            drop_count += 1
+            labels[i + 1] = f"Drop {drop_count}"
 
     breakdown_count = 0
     for i in range(1, n):
@@ -245,15 +246,21 @@ def _ai_label_sections(sections: list) -> list | None:
     if not os.environ.get("ANTHROPIC_API_KEY", ""):
         return None
 
+    # Bases that must always carry a number (they repeat in a song)
+    _MUST_NUMBER = {"Verse", "Buildup", "Drop"}
     _SECTION_BASES = {"Intro", "Verse", "Buildup", "Drop", "Breakdown", "Outro"}
 
     def _valid_label(lbl: str) -> bool:
-        """Accept 'Intro', 'Drop 1', 'Verse 2', 'Breakdown', etc."""
+        """Accept 'Intro', 'Drop 1', 'Verse 2', 'Breakdown', 'Breakdown 2', etc.
+        Verse / Buildup / Drop MUST have a numeric suffix."""
         parts = lbl.rsplit(" ", 1)
-        if parts[0] not in _SECTION_BASES:
+        base  = parts[0]
+        if base not in _SECTION_BASES:
             return False
         if len(parts) == 2 and not parts[1].isdigit():
             return False
+        if base in _MUST_NUMBER and len(parts) == 1:
+            return False  # e.g. bare "Drop" / "Verse" are rejected
         return True
 
     rows = []
@@ -272,13 +279,19 @@ def _ai_label_sections(sections: list) -> list | None:
 
     prompt = f"""You are an expert in EDM music structure. Label each segment.
 
-Numbering rules:
+CRITICAL ENERGY RULE:
+- The segment with the HIGHEST energy value is ALWAYS a Drop (Drop 1 if it is the first/only drop).
+- Buildups MUST show clearly rising energy leading into their Drop — if a segment precedes the
+  highest-energy segment and has rising energy, it is a Buildup.
+- Never label a segment "Drop" if it is not among the highest-energy segments.
+
+Numbering rules (REQUIRED — never omit the number for Verse/Buildup/Drop):
 - Intro and Outro appear once — no number (just "Intro", "Outro")
-- Verse, Buildup, Drop, Breakdown are numbered in order of appearance:
-  first Verse → "Verse 1", second → "Verse 2", third → "Verse 3", etc.
-  first Buildup → "Buildup 1", second → "Buildup 2", etc.
-  first Drop → "Drop 1", second → "Drop 2", etc.
-  first Breakdown → "Breakdown", second → "Breakdown 2", etc.
+- Verse, Buildup, Drop MUST always carry a number:
+  first Verse → "Verse 1", second → "Verse 2", third → "Verse 3"
+  first Buildup → "Buildup 1", second → "Buildup 2"
+  first Drop → "Drop 1", second → "Drop 2"
+- Breakdown: first → "Breakdown", subsequent → "Breakdown 2", "Breakdown 3"
 
 Typical EDM flow (not all sections required):
 Intro → Verse 1 → Buildup 1 → Drop 1 → Breakdown → Verse 2 → Buildup 2 → Drop 2 → Outro
@@ -287,7 +300,7 @@ Key audio signatures:
 - Intro: opening, sparse, energy building in gradually
 - Verse N: stable mid-energy, melodic/vocal content
 - Buildup N: energy, centroid, and onset density all rising — creates tension before drop
-- Drop N: peak energy, heavy sub-bass, punchy kick — arrives immediately after Buildup
+- Drop N: PEAK energy, heavy sub-bass, punchy kick — arrives immediately after Buildup
 - Breakdown/N: sharp energy drop after Drop, atmospheric or stripped-back
 - Outro: closing, energy tapering off to silence
 

@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkBreaks from "remark-breaks";
 import "./App.css";
 
 // ── Upload box ─────────────────────────────────────────────────────────────
@@ -187,10 +188,12 @@ function PriorityScoresPanel({ scores }) {
 const FREQ_KEYS   = ["sub_bass_pct", "bass_pct", "low_mids_pct", "mids_pct", "high_mids_pct", "highs_pct"];
 const FREQ_LABELS = ["Sub", "Bass", "Lo-M", "Mids", "Hi-M", "Highs"];
 
-// EDM section types in canonical display order (numbered variants included up to ×3)
+// EDM section types in canonical display order.
+// Un-numbered fallbacks (Verse, Buildup, Drop) appear first so they show up
+// if the AI returns labels without a number suffix.
 const SECTION_ORDER = [
   "Intro",
-  "Verse 1", "Buildup 1", "Drop 1",
+  "Verse",  "Verse 1",  "Buildup",  "Buildup 1",  "Drop",  "Drop 1",
   "Breakdown",
   "Verse 2", "Buildup 2", "Drop 2",
   "Breakdown 2",
@@ -383,24 +386,38 @@ function WaveformChart({ refAnalysis, wipAnalysis }) {
           ))}
 
           {/* Section markers — WIP (pink lines + labels for every section) */}
-          {(wipAnalysis.sections ?? []).map((sec, i) => (
-            <g key={`ws${i}`}>
-              {/* Vertical boundary line for every section except the first (which starts at 0) */}
-              {i > 0 && (
-                <line x1={tx(sec.start)} y1={PT} x2={tx(sec.start)} y2={PT + PH}
-                  stroke="rgba(255,101,132,0.35)" strokeWidth="1" strokeDasharray="3,3" />
-              )}
-              {/* Label: first section pinned to the left plot edge, rest follow their start */}
-              <text
-                x={i === 0 ? PL + 3 : Number(tx(sec.start)) + 3}
-                y={PT + 10}
-                fill="rgba(255,101,132,0.7)"
-                fontSize="8.5"
-              >
-                {sec.label}
-              </text>
-            </g>
-          ))}
+          {(() => {
+            const secs = wipAnalysis.sections ?? [];
+            let lastLabelX = -999;
+            let rowIndex = 0;
+            const yRows = [PT + 10, PT + 21, PT + 32];
+            return secs.map((sec, i) => {
+              const xVal = i === 0 ? PL + 3 : Number(tx(sec.start)) + 3;
+              const showLabel = xVal - lastLabelX >= 28;
+              if (showLabel) {
+                lastLabelX = xVal;
+                rowIndex = (rowIndex + 1) % yRows.length;
+              }
+              return (
+                <g key={`ws${i}`}>
+                  {i > 0 && (
+                    <line x1={tx(sec.start)} y1={PT} x2={tx(sec.start)} y2={PT + PH}
+                      stroke="rgba(255,101,132,0.35)" strokeWidth="1" strokeDasharray="3,3" />
+                  )}
+                  {showLabel && (
+                    <text
+                      x={xVal}
+                      y={yRows[rowIndex]}
+                      fill="rgba(255,101,132,0.7)"
+                      fontSize="8.5"
+                    >
+                      {sec.label}
+                    </text>
+                  )}
+                </g>
+              );
+            });
+          })()}
 
           {/* Lines */}
           <path d={linePath(refP)} fill="none" stroke="#6c63ff" strokeWidth="1.5" />
@@ -567,7 +584,7 @@ function ChatPanel({ jobId }) {
             <div key={i} className={`chat-message ${m.role}`}>
               <div className="chat-bubble">
                 {m.role === "assistant"
-                  ? <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{m.content}</ReactMarkdown></div>
+                  ? <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={MD_COMPONENTS}>{m.content}</ReactMarkdown></div>
                   : m.content}
               </div>
             </div>
@@ -1085,8 +1102,7 @@ export default function App() {
 
                 <SectionComparisonPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
                 <WaveformChart refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
-                <SidechainPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
-                <StemAnalysisPanel stemAnalyses={stemAnalyses} />
+<StemAnalysisPanel stemAnalyses={stemAnalyses} />
               </>
             )}
           </section>
@@ -1105,7 +1121,7 @@ export default function App() {
             </h2>
             <div className="suggestions-card">
               {suggestions ? (
-                <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{suggestions}</ReactMarkdown></div>
+                <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={MD_COMPONENTS}>{suggestions}</ReactMarkdown></div>
               ) : (
                 <div className="suggestions-placeholder">
                   <span className="spinner large" />

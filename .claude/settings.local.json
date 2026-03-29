@@ -12,7 +12,13 @@
       "Bash(python3 -c \"import librosa, anthropic, fastapi, uvicorn, numpy; print\\(''All backend deps OK''\\)\")",
       "Bash(python3 -c \"import librosa\")",
       "Bash(chmod:*)",
-      "Bash(find /Users/SakulNathwani/song-analyzer -type f -name *.py -o -name *.ts -o -name *.tsx -o -name *.js -o -name *.jsx -o -name *.json -o -name *.txt -o -name *.md -o -name .env*)"
+      "Bash(find /Users/SakulNathwani/song-analyzer -type f -name *.py -o -name *.ts -o -name *.tsx -o -name *.js -o -name *.jsx -o -name *.json -o -name *.txt -o -name *.md -o -name .env*)",
+      "Bash(git add:*)",
+      "Bash(git restore:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "WebSearch",
+      "WebFetch(domain:replicate.com)"
     ]
   }
 }
