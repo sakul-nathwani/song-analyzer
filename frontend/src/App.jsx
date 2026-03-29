@@ -882,7 +882,6 @@ export default function App() {
     setPriorityScores([]);
     setStemAnalyses(null);
     setStemError(null);
-    setPhase1Data(null);
     setJobId(null);
     setError("");
 
