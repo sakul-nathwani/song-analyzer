@@ -42,9 +42,6 @@ def _log_env_diagnostics() -> None:
         "REPLICATE_API_KEY":    os.environ.get("REPLICATE_API_KEY", ""),
         "REPLICATE_TOKEN":      os.environ.get("REPLICATE_TOKEN", ""),
         "REPLICATE_KEY":        os.environ.get("REPLICATE_KEY", ""),
-        "SUPABASE_URL":         os.environ.get("SUPABASE_URL", ""),
-        "SUPABASE_SERVICE_KEY": os.environ.get("SUPABASE_SERVICE_KEY", ""),
-        "SUPABASE_ANON_KEY":    os.environ.get("SUPABASE_ANON_KEY", ""),
     }
     log.info("=== Environment variable diagnostics ===")
     for name, val in checks.items():
@@ -518,20 +515,9 @@ def analyze_audio(file_path: str) -> dict:
     }
 
 
-# ── Stem separation (Replicate + Supabase) ─────────────────────────────────
+# ── Stem separation (Replicate) ────────────────────────────────────────────
 
-_SUPABASE_BUCKET = "stems"
-_STEM_NAMES      = ["drums", "bass", "other"]
-
-
-def _get_supabase_client():
-    """Lazy init. Returns None if SUPABASE_URL / SUPABASE_SERVICE_KEY are unset."""
-    url = os.environ.get("SUPABASE_URL", "")
-    key = os.environ.get("SUPABASE_SERVICE_KEY", "")
-    if not url or not key:
-        return None
-    from supabase import create_client  # noqa: PLC0415
-    return create_client(url, key)
+_STEM_NAMES = ["drums", "bass", "other"]
 
 
 def _analyze_stem(path: str, stem_name: str) -> dict:
@@ -564,8 +550,9 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> tuple[dict, str | No
     stem_path_map is {stem_name: local_tmp_path} for drums / bass / other, or {}
     on failure. error_message is None on success, a human-readable string on failure.
 
-    Checks Supabase Storage first (keyed by SHA-256); on cache-miss runs
-    ryan5453/demucs on Replicate and stores results back in Supabase.
+    Passes the audio file directly to the Replicate SDK (which handles its own
+    upload internally), then downloads the returned stems to local temp files for
+    librosa analysis. No external storage is used.
     """
     replicate_token = _get_replicate_token()
     if not replicate_token:
@@ -576,122 +563,50 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> tuple[dict, str | No
         log.warning("[stems] %s", msg)
         return {}, msg
 
-    sb = _get_supabase_client()
-    if sb is None:
-        msg = "Supabase is not configured (SUPABASE_URL / SUPABASE_SERVICE_KEY missing)"
-        log.warning("[stems] %s", msg)
-        return {}, msg
-
     log.info("[stems] Starting stem pipeline for hash=%s", file_hash[:12])
 
-    # ── 1. Try Supabase cache ──────────────────────────────────────────────
-    stem_paths: dict[str, str] = {}
-    try:
-        log.info("[stems] Checking Supabase cache at bucket=%s prefix=%s/", _SUPABASE_BUCKET, file_hash[:12])
-        for stem in _STEM_NAMES:
-            storage_key = f"{file_hash}/{stem}.wav"
-            data = sb.storage.from_(_SUPABASE_BUCKET).download(storage_key)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tf:
-                tf.write(data)
-                stem_paths[stem] = tf.name
-            log.info("[stems] Cache hit: %s (%d bytes)", stem, len(data))
-        if len(stem_paths) == len(_STEM_NAMES):
-            log.info("[stems] All stems served from Supabase cache")
-            return stem_paths, None
-    except Exception as exc:
-        log.info("[stems] Cache miss or partial (%s) — will run Replicate", exc)
-        for p in stem_paths.values():
-            try: os.unlink(p)
-            except: pass
-        stem_paths = {}
-
-    # ── 2. Upload original to Supabase for a signed URL Replicate can fetch ─
-    ext        = os.path.splitext(file_path)[1] or ".wav"
-    upload_key = f"uploads/{file_hash}{ext}"
-    try:
-        file_size = os.path.getsize(file_path)
-        log.info("[stems] Uploading original to Supabase (%d bytes) → %s", file_size, upload_key)
-        with open(file_path, "rb") as fh:
-            file_bytes = fh.read()
-        try:
-            sb.storage.from_(_SUPABASE_BUCKET).upload(
-                upload_key, file_bytes,
-                file_options={"content-type": "audio/mpeg", "upsert": "true"},
-            )
-            log.info("[stems] Uploaded original to Supabase successfully")
-        except Exception as upload_exc:
-            # Only tolerate "already exists" (409 / Duplicate) — re-raise anything else
-            err_str = str(upload_exc).lower()
-            if "already exists" in err_str or "duplicate" in err_str or "409" in err_str:
-                log.info("[stems] File already exists in Supabase, reusing it")
-            else:
-                log.error("[stems] Upload failed (not a duplicate): %s", upload_exc, exc_info=True)
-                raise
-
-        signed = sb.storage.from_(_SUPABASE_BUCKET).create_signed_url(upload_key, expires_in=3600)
-        log.info("[stems] create_signed_url response keys: %s", list(signed.keys()) if isinstance(signed, dict) else type(signed))
-        audio_url = (
-            signed.get("signedURL")
-            or signed.get("signedUrl")
-            or (signed.get("data") or {}).get("signedUrl")
-            or (signed.get("data") or {}).get("signedURL")
-        )
-        if not audio_url:
-            msg = f"Could not extract signed URL from Supabase response: {signed}"
-            log.error("[stems] %s", msg)
-            return {}, msg
-        log.info("[stems] Got signed URL (length=%d)", len(audio_url))
-    except Exception as exc:
-        msg = f"Supabase upload/sign failed: {exc}"
-        log.error("[stems] %s", msg, exc_info=True)
-        return {}, msg
-
-    # ── 3. Run Demucs on Replicate ─────────────────────────────────────────
+    # ── 1. Run Demucs on Replicate, passing the file object directly ───────
     try:
         import replicate as _replicate  # noqa: PLC0415
-        # The replicate SDK reads REPLICATE_API_TOKEN by default; if the token
-        # lives under a different variable name, pass it explicitly via the client.
         log.info("[stems] Submitting to Replicate (ryan5453/demucs) — this may take 1-3 minutes")
         t0 = time.time()
-        client_kwargs = {}
-        if os.environ.get("REPLICATE_API_TOKEN", "") != replicate_token:
-            client_kwargs["api_token"] = replicate_token
-        if client_kwargs:
-            replicate_client = _replicate.Client(**client_kwargs)
-            output = replicate_client.run("ryan5453/demucs", input={"audio": audio_url})
-        else:
-            output = _replicate.run("ryan5453/demucs", input={"audio": audio_url})
+        with open(file_path, "rb") as audio_fh:
+            if os.environ.get("REPLICATE_API_TOKEN", "") != replicate_token:
+                # Token is under a non-standard name — pass it explicitly
+                replicate_client = _replicate.Client(api_token=replicate_token)
+                output = replicate_client.run("ryan5453/demucs", input={"audio": audio_fh})
+            else:
+                output = _replicate.run("ryan5453/demucs", input={"audio": audio_fh})
         elapsed = time.time() - t0
         log.info("[stems] Replicate completed in %.1fs, output type=%s", elapsed, type(output).__name__)
         if isinstance(output, dict):
             log.info("[stems] Replicate output keys: %s", list(output.keys()))
         elif hasattr(output, "__iter__"):
-            items = list(output)
-            log.info("[stems] Replicate output is iterable with %d items", len(items))
-            output = items
+            output = list(output)
+            log.info("[stems] Replicate output is a list with %d items", len(output))
     except Exception as exc:
         msg = f"Replicate API call failed: {exc}"
         log.error("[stems] %s", msg, exc_info=True)
         return {}, msg
 
-    # ── 4. Parse Replicate output into {stem: url} ─────────────────────────
+    # ── 2. Parse output into {stem_name: url} ─────────────────────────────
     stem_url_map: dict[str, str] = {}
     if isinstance(output, dict):
         stem_url_map = {k: str(v) for k, v in output.items() if k in _STEM_NAMES}
-        log.info("[stems] Parsed dict output: found stems %s", list(stem_url_map.keys()))
     elif isinstance(output, list):
         for item in output:
             name = getattr(item, "name", None) or getattr(item, "stem", None)
             if name and name in _STEM_NAMES:
                 stem_url_map[name] = str(item)
-        log.info("[stems] Parsed list output: found stems %s", list(stem_url_map.keys()))
+    log.info("[stems] Stems found in output: %s", list(stem_url_map.keys()))
 
     if not stem_url_map:
-        msg = f"Replicate returned no recognisable stem URLs. Raw output: {output!r:.200}"
+        msg = f"Replicate returned no recognisable stem URLs. Raw output: {output!r:.300}"
         log.error("[stems] %s", msg)
         return {}, msg
 
-    # ── 5. Download stems locally and cache in Supabase ───────────────────
+    # ── 3. Download each stem to a local temp file for librosa ────────────
+    stem_paths: dict[str, str] = {}
     for stem in _STEM_NAMES:
         url = stem_url_map.get(stem)
         if not url:
@@ -700,32 +615,17 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> tuple[dict, str | No
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tf:
                 stem_local = tf.name
-            log.info("[stems] Downloading %s stem from Replicate...", stem)
+            log.info("[stems] Downloading stem '%s'...", stem)
             urllib.request.urlretrieve(url, stem_local)
-            size = os.path.getsize(stem_local)
-            log.info("[stems] Downloaded %s: %d bytes → %s", stem, size, stem_local)
+            log.info("[stems] Downloaded '%s': %d bytes", stem, os.path.getsize(stem_local))
             stem_paths[stem] = stem_local
-
-            with open(stem_local, "rb") as fh:
-                stem_bytes = fh.read()
-            try:
-                sb.storage.from_(_SUPABASE_BUCKET).upload(
-                    f"{file_hash}/{stem}.wav", stem_bytes,
-                    file_options={"content-type": "audio/wav", "upsert": "true"},
-                )
-                log.info("[stems] Cached %s in Supabase", stem)
-            except Exception as cache_exc:
-                log.warning("[stems] Failed to cache %s in Supabase: %s", stem, cache_exc)
-        except Exception as dl_exc:
-            log.error("[stems] Failed to download %s: %s", stem, dl_exc, exc_info=True)
-            continue
+        except Exception as exc:
+            log.error("[stems] Failed to download stem '%s': %s", stem, exc, exc_info=True)
 
     if not stem_paths:
-        msg = "All stem downloads failed — check Replicate output URLs"
-        log.error("[stems] %s", msg)
-        return {}, msg
+        return {}, "All stem downloads from Replicate failed"
 
-    log.info("[stems] Successfully produced %d stems: %s", len(stem_paths), list(stem_paths.keys()))
+    log.info("[stems] Ready to analyse %d stems: %s", len(stem_paths), list(stem_paths.keys()))
     return stem_paths, None
 
 
