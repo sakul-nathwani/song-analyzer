@@ -187,8 +187,16 @@ function PriorityScoresPanel({ scores }) {
 const FREQ_KEYS   = ["sub_bass_pct", "bass_pct", "low_mids_pct", "mids_pct", "high_mids_pct", "highs_pct"];
 const FREQ_LABELS = ["Sub", "Bass", "Lo-M", "Mids", "Hi-M", "Highs"];
 
-// EDM section types in display order
-const SECTION_ORDER = ["Intro", "Verse", "Buildup", "Drop", "Breakdown", "Outro"];
+// EDM section types in canonical display order (numbered variants included up to ×3)
+const SECTION_ORDER = [
+  "Intro",
+  "Verse 1", "Buildup 1", "Drop 1",
+  "Breakdown",
+  "Verse 2", "Buildup 2", "Drop 2",
+  "Breakdown 2",
+  "Verse 3", "Buildup 3", "Drop 3",
+  "Outro",
+];
 
 function groupByLabel(sections) {
   const groups = {};

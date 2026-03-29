@@ -189,6 +189,7 @@ def _heuristic_label_sections(sections: list, energies: list) -> list:
     if n > 1 and energies[-1] < mean_e * 0.75:
         labels[-1] = "Outro"
 
+    drop_count = 0
     for i in range(n):
         if labels[i]: continue
         if sections[i]["start"] < 30.0: continue
@@ -198,9 +199,10 @@ def _heuristic_label_sections(sections: list, energies: list) -> list:
         )
         threshold = mean_e * 1.35 if has_buildup_before else mean_e * 1.50
         if energies[i] >= threshold and duration >= 20.0:
-            labels[i] = "Drop"
+            drop_count += 1
+            labels[i] = f"Drop {drop_count}"
 
-    if not any(l == "Drop" for l in labels):
+    if drop_count == 0:
         for i in range(n):
             if labels[i]: continue
             if sections[i]["start"] < 30.0: continue
@@ -209,20 +211,27 @@ def _heuristic_label_sections(sections: list, energies: list) -> list:
             )
             threshold = mean_e * 1.25 if has_buildup_before else mean_e * 1.40
             if energies[i] >= threshold:
-                labels[i] = "Drop"
+                drop_count += 1
+                labels[i] = f"Drop {drop_count}"
 
+    buildup_count = 0
     for i in range(n - 1):
-        if not labels[i] and labels[i + 1] == "Drop":
-            labels[i] = "Buildup"
+        if not labels[i] and labels[i + 1].startswith("Drop"):
+            buildup_count += 1
+            labels[i] = f"Buildup {buildup_count}"
 
+    breakdown_count = 0
     for i in range(1, n):
-        if not labels[i] and labels[i - 1] == "Drop":
+        if not labels[i] and labels[i - 1].startswith("Drop"):
             if energies[i] < energies[i - 1] * 0.82:
-                labels[i] = "Breakdown"
+                breakdown_count += 1
+                labels[i] = "Breakdown" if breakdown_count == 1 else f"Breakdown {breakdown_count}"
 
+    verse_count = 0
     for i in range(n):
         if not labels[i]:
-            labels[i] = "Verse"
+            verse_count += 1
+            labels[i] = f"Verse {verse_count}"
 
     return labels
 
@@ -236,7 +245,16 @@ def _ai_label_sections(sections: list) -> list | None:
     if not os.environ.get("ANTHROPIC_API_KEY", ""):
         return None
 
-    valid_labels = {"Intro", "Verse", "Buildup", "Drop", "Breakdown", "Outro"}
+    _SECTION_BASES = {"Intro", "Verse", "Buildup", "Drop", "Breakdown", "Outro"}
+
+    def _valid_label(lbl: str) -> bool:
+        """Accept 'Intro', 'Drop 1', 'Verse 2', 'Breakdown', etc."""
+        parts = lbl.rsplit(" ", 1)
+        if parts[0] not in _SECTION_BASES:
+            return False
+        if len(parts) == 2 and not parts[1].isdigit():
+            return False
+        return True
 
     rows = []
     for i, s in enumerate(sections):
@@ -254,26 +272,36 @@ def _ai_label_sections(sections: list) -> list | None:
 
     prompt = f"""You are an expert in EDM music structure. Label each segment.
 
-Valid labels (use exactly these): Intro, Verse, Buildup, Drop, Breakdown, Outro
+Numbering rules:
+- Intro and Outro appear once — no number (just "Intro", "Outro")
+- Verse, Buildup, Drop, Breakdown are numbered in order of appearance:
+  first Verse → "Verse 1", second → "Verse 2", third → "Verse 3", etc.
+  first Buildup → "Buildup 1", second → "Buildup 2", etc.
+  first Drop → "Drop 1", second → "Drop 2", etc.
+  first Breakdown → "Breakdown", second → "Breakdown 2", etc.
 
-Key signatures:
-- Intro: opening, low-to-mid energy, sparse elements building in
-- Verse: mid energy, melodic/vocal content, stable
-- Buildup: energy/centroid/onsets rising toward peak, creates tension
-- Drop: peak energy, heavy sub-bass, punchy kick, arrives right after Buildup
-- Breakdown: energy drops sharply after Drop, atmospheric/stripped back
-- Outro: closing, energy tapering off toward silence
+Typical EDM flow (not all sections required):
+Intro → Verse 1 → Buildup 1 → Drop 1 → Breakdown → Verse 2 → Buildup 2 → Drop 2 → Outro
+
+Key audio signatures:
+- Intro: opening, sparse, energy building in gradually
+- Verse N: stable mid-energy, melodic/vocal content
+- Buildup N: energy, centroid, and onset density all rising — creates tension before drop
+- Drop N: peak energy, heavy sub-bass, punchy kick — arrives immediately after Buildup
+- Breakdown/N: sharp energy drop after Drop, atmospheric or stripped-back
+- Outro: closing, energy tapering off to silence
 
 Segments ({len(sections)}, total duration {sections[-1]["end"]}s):
 {chr(10).join(rows)}
 
-Respond with ONLY a JSON array of {len(sections)} labels, e.g. ["Intro","Buildup","Drop","Outro"]"""
+Respond with ONLY a JSON array of {len(sections)} labels.
+Example: ["Intro","Verse 1","Buildup 1","Drop 1","Breakdown","Verse 2","Buildup 2","Drop 2","Outro"]"""
 
     try:
         client   = anthropic.Anthropic()
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=200,
+            max_tokens=250,
             messages=[{"role": "user", "content": prompt}],
         )
         text   = response.content[0].text.strip()
@@ -285,7 +313,7 @@ Respond with ONLY a JSON array of {len(sections)} labels, e.g. ["Intro","Buildup
         if (
             isinstance(labels, list)
             and len(labels) == len(sections)
-            and all(l in valid_labels for l in labels)
+            and all(_valid_label(l) for l in labels)
         ):
             log.info("[sections] AI labels: %s", labels)
             return labels
