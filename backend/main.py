@@ -1087,6 +1087,10 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
             )
 
         job = _read_job(job_id) or {}
+        if job.get("status") == "cancelled":
+            log.info("[job %s] Cancelled before AI call — exiting", job_id[:8])
+            return
+
         job["stage"] = "generating"
         _write_job(job_id, job)
 
@@ -1239,6 +1243,20 @@ def get_status(job_id: str):
         "error":      job["error"],
         "stem_error": result.get("stem_error"),
     }
+
+
+@app.post("/cancel/{job_id}")
+def cancel_job(job_id: str):
+    job = _read_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    if job.get("status") not in ("running",):
+        return {"status": "ok"}  # already done/errored — nothing to do
+    job["status"] = "cancelled"
+    job["stage"]  = "cancelled"
+    _write_job(job_id, job)
+    log.info("[job %s] Cancelled by user", job_id[:8])
+    return {"status": "ok"}
 
 
 class ChatMessage(BaseModel):

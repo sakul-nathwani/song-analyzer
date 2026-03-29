@@ -872,6 +872,22 @@ export default function App() {
     localStorage.removeItem("songAnalyzerHistory");
   };
 
+  const handleStop = () => {
+    clearInterval(pollRef.current);
+    if (jobId) {
+      fetch(`/cancel/${jobId}`, { method: "POST" }).catch(() => {});
+    }
+    setStage("idle");
+    setJobId(null);
+    setSuggestions("");
+    setRefAnalysis(null);
+    setWipAnalysis(null);
+    setPriorityScores([]);
+    setStemAnalyses(null);
+    setStemError(null);
+    setError("");
+  };
+
   const handleAnalyze = async () => {
     if (!canAnalyze) return;
 
@@ -1034,6 +1050,12 @@ export default function App() {
                 <><span className="btn-icon">✦</span>Run Analysis</>
               )}
             </button>
+
+            {isAnalyzing && (
+              <button className="stop-btn" onClick={handleStop} title="Cancel analysis">
+                ✕ Stop
+              </button>
+            )}
 
             <label className={`deep-toggle ${isAnalyzing ? "disabled" : ""}`}>
               <input

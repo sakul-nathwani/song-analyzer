@@ -1346,6 +1346,25 @@ body {
   max-width: 340px;
 }
 
+.stop-btn {
+  flex-shrink: 0;
+  padding: 10px 18px;
+  background: rgba(255, 80, 80, 0.12);
+  color: rgba(255, 120, 120, 0.9);
+  border: 1px solid rgba(255, 80, 80, 0.25);
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+.stop-btn:hover {
+  background: rgba(255, 80, 80, 0.22);
+  color: #ff6464;
+  border-color: rgba(255, 80, 80, 0.45);
+}
+
 /* ── Deep Analysis toggle ── */
 .deep-toggle {
   display: flex;
