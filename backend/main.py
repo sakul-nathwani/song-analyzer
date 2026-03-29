@@ -570,38 +570,48 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> tuple[dict, str | No
         import replicate as _replicate  # noqa: PLC0415
         log.info("[stems] Submitting to Replicate (ryan5453/demucs) — this may take 1-3 minutes")
         t0 = time.time()
+        # Pin the version hash so the SDK calls the prediction endpoint directly
+        # rather than resolving the latest version (which can itself 404).
+        MODEL = "ryan5453/demucs:5a7041cc9b82e5a558fea6b3d7b12dea89625e89da33f0447bd727c2d0ab9e77"
         with open(file_path, "rb") as audio_fh:
             if os.environ.get("REPLICATE_API_TOKEN", "") != replicate_token:
-                # Token is under a non-standard name — pass it explicitly
                 replicate_client = _replicate.Client(api_token=replicate_token)
-                output = replicate_client.run("ryan5453/demucs", input={"audio": audio_fh})
+                output = replicate_client.run(MODEL, input={"audio": audio_fh})
             else:
-                output = _replicate.run("ryan5453/demucs", input={"audio": audio_fh})
+                output = _replicate.run(MODEL, input={"audio": audio_fh})
         elapsed = time.time() - t0
         log.info("[stems] Replicate completed in %.1fs, output type=%s", elapsed, type(output).__name__)
-        if isinstance(output, dict):
-            log.info("[stems] Replicate output keys: %s", list(output.keys()))
-        elif hasattr(output, "__iter__"):
-            output = list(output)
-            log.info("[stems] Replicate output is a list with %d items", len(output))
+        log.info("[stems] Raw output: %r", str(output)[:300])
     except Exception as exc:
         msg = f"Replicate API call failed: {exc}"
         log.error("[stems] %s", msg, exc_info=True)
         return {}, msg
 
     # ── 2. Parse output into {stem_name: url} ─────────────────────────────
+    # ryan5453/demucs returns {"stems": [{name, audio}, ...]}
     stem_url_map: dict[str, str] = {}
+    stems_list = None
     if isinstance(output, dict):
+        stems_list = output.get("stems")
+    # Some SDK versions materialise the output as an object with a .stems attribute
+    if stems_list is None and hasattr(output, "stems"):
+        stems_list = output.stems
+    if stems_list:
+        for item in stems_list:
+            if isinstance(item, dict):
+                name, url = item.get("name"), item.get("audio") or item.get("url")
+            else:
+                name = getattr(item, "name", None)
+                url  = getattr(item, "audio", None) or getattr(item, "url", None)
+            if name and url and name in _STEM_NAMES:
+                stem_url_map[name] = str(url)
+    # Fallback: flat dict {stem_name: url}
+    if not stem_url_map and isinstance(output, dict):
         stem_url_map = {k: str(v) for k, v in output.items() if k in _STEM_NAMES}
-    elif isinstance(output, list):
-        for item in output:
-            name = getattr(item, "name", None) or getattr(item, "stem", None)
-            if name and name in _STEM_NAMES:
-                stem_url_map[name] = str(item)
-    log.info("[stems] Stems found in output: %s", list(stem_url_map.keys()))
+    log.info("[stems] Stems parsed from output: %s", list(stem_url_map.keys()))
 
     if not stem_url_map:
-        msg = f"Replicate returned no recognisable stem URLs. Raw output: {output!r:.300}"
+        msg = f"Replicate returned no recognisable stem URLs. Raw output: {str(output)[:300]}"
         log.error("[stems] %s", msg)
         return {}, msg
 
