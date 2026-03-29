@@ -616,7 +616,7 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> tuple[dict, str | No
         try:
             sb.storage.from_(_SUPABASE_BUCKET).upload(
                 upload_key, file_bytes,
-                file_options={"content-type": "audio/mpeg", "upsert": True},
+                file_options={"content-type": "audio/mpeg", "upsert": "true"},
             )
             log.info("[stems] Uploaded original to Supabase successfully")
         except Exception as upload_exc:
@@ -711,7 +711,7 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> tuple[dict, str | No
             try:
                 sb.storage.from_(_SUPABASE_BUCKET).upload(
                     f"{file_hash}/{stem}.wav", stem_bytes,
-                    file_options={"content-type": "audio/wav", "upsert": True},
+                    file_options={"content-type": "audio/wav", "upsert": "true"},
                 )
                 log.info("[stems] Cached %s in Supabase", stem)
             except Exception as cache_exc:
