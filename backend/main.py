@@ -1173,6 +1173,56 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
                 stem_error_msg = stem_errors[0] if stem_errors else "Stem separation produced no results"
                 log.warning("[job %s] Stem separation failed: %s", job_id[:8], stem_error_msg)
 
+        # ── Phase 1 complete: store intermediate data, pause for section review ──
+        stem_analyses_result = None
+        if deep_analysis and (ref_stems or wip_stems):
+            stem_analyses_result = {"reference": ref_stems, "wip": wip_stems}
+
+        log.info("[job %s] Phase 1 complete — awaiting section confirmation", job_id[:8])
+        job = _read_job(job_id) or {}
+        job["stage"]  = "section_review"
+        job["phase1"] = {
+            "ref_analysis":  ref_analysis,
+            "wip_analysis":  wip_analysis,
+            "n_refs":        n_refs,
+            "stem_analyses": stem_analyses_result,
+            "stem_error":    stem_error_msg,
+            "deadline":      deadline,
+        }
+        _write_job(job_id, job)
+
+    except Exception as exc:
+        job = _read_job(job_id) or {}
+        job.update({"status": "error", "error": str(exc)})
+        _write_job(job_id, job)
+
+    finally:
+        _job_semaphore.release()
+        for path in ref_paths + [wip_path]:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def _run_ai_from_job(job_id: str) -> None:
+    """Phase 2 worker: reads phase1 data and generates AI feedback."""
+    try:
+        job = _read_job(job_id)
+        if not job or "phase1" not in job:
+            log.error("[job %s] _run_ai_from_job: phase1 data missing", job_id[:8])
+            return
+
+        p1             = job["phase1"]
+        ref_analysis   = p1["ref_analysis"]
+        wip_analysis   = p1["wip_analysis"]
+        n_refs         = p1["n_refs"]
+        stem_info      = p1.get("stem_analyses") or {}
+        ref_stems      = stem_info.get("reference") or {}
+        wip_stems      = stem_info.get("wip") or {}
+        stem_error_msg = p1.get("stem_error")
+        deadline       = p1.get("deadline", time.time() + _MAX_ANALYSIS_SECONDS)
+
         if time.time() > deadline:
             raise TimeoutError(
                 "Analysis timed out before AI feedback could be generated. "
@@ -1201,10 +1251,10 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
         ).strip()
 
         stem_analyses_result = None
-        if deep_analysis and (ref_stems or wip_stems):
+        if ref_stems or wip_stems:
             stem_analyses_result = {"reference": ref_stems, "wip": wip_stems}
 
-        log.info("[job %s] Complete — writing result", job_id[:8])
+        log.info("[job %s] Phase 2 complete — writing result", job_id[:8])
         job.update({
             "status": "done",
             "stage":  "done",
@@ -1224,14 +1274,7 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
         job = _read_job(job_id) or {}
         job.update({"status": "error", "error": str(exc)})
         _write_job(job_id, job)
-
-    finally:
-        _job_semaphore.release()
-        for path in ref_paths + [wip_path]:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+        log.error("[job %s] Phase 2 failed: %s", job_id[:8], exc)
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
@@ -1323,14 +1366,53 @@ def get_status(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found or expired")
     # No auto-delete — job file must persist for the /chat endpoint.
     # TTL cleanup (_cleanup_old_jobs) handles removal after 1 hour.
-    result = job["result"] or {}
+    result  = job["result"] or {}
+    p1      = job.get("phase1") or {}
+    # Expose phase1 analysis data only during section_review so frontend can render editor
+    phase1_out = None
+    if job.get("stage") == "section_review":
+        phase1_out = {
+            "ref_analysis": p1.get("ref_analysis"),
+            "wip_analysis": p1.get("wip_analysis"),
+        }
     return {
         "status":     job["status"],
         "stage":      job["stage"],
         "result":     job["result"],
         "error":      job["error"],
         "stem_error": result.get("stem_error"),
+        "phase1":     phase1_out,
     }
+
+
+class ConfirmSectionsBody(BaseModel):
+    wip_sections: list[dict]
+
+
+@app.post("/confirm-sections/{job_id}")
+def confirm_sections(
+    job_id: str,
+    body: ConfirmSectionsBody,
+    background_tasks: BackgroundTasks,
+):
+    job = _read_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    if job.get("stage") != "section_review":
+        raise HTTPException(status_code=409, detail="Job is not awaiting section confirmation")
+
+    p1 = job.get("phase1")
+    if not p1:
+        raise HTTPException(status_code=409, detail="Phase 1 data missing — cannot confirm")
+
+    # Patch the wip sections with what the user confirmed
+    p1["wip_analysis"]["sections"] = body.wip_sections
+    job["phase1"] = p1
+    job["stage"]  = "generating"
+    _write_job(job_id, job)
+
+    background_tasks.add_task(_run_ai_from_job, job_id)
+    return {"status": "ok"}
 
 
 class ChatMessage(BaseModel):
