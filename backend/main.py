@@ -616,11 +616,17 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> tuple[dict, str | No
         try:
             sb.storage.from_(_SUPABASE_BUCKET).upload(
                 upload_key, file_bytes,
-                file_options={"content-type": "audio/mpeg", "upsert": "true"},
+                file_options={"content-type": "audio/mpeg", "upsert": True},
             )
             log.info("[stems] Uploaded original to Supabase successfully")
         except Exception as upload_exc:
-            log.info("[stems] Upload attempt returned: %s (may already exist, continuing)", upload_exc)
+            # Only tolerate "already exists" (409 / Duplicate) — re-raise anything else
+            err_str = str(upload_exc).lower()
+            if "already exists" in err_str or "duplicate" in err_str or "409" in err_str:
+                log.info("[stems] File already exists in Supabase, reusing it")
+            else:
+                log.error("[stems] Upload failed (not a duplicate): %s", upload_exc, exc_info=True)
+                raise
 
         signed = sb.storage.from_(_SUPABASE_BUCKET).create_signed_url(upload_key, expires_in=3600)
         log.info("[stems] create_signed_url response keys: %s", list(signed.keys()) if isinstance(signed, dict) else type(signed))
@@ -705,7 +711,7 @@ def _get_or_create_stems(file_path: str, file_hash: str) -> tuple[dict, str | No
             try:
                 sb.storage.from_(_SUPABASE_BUCKET).upload(
                     f"{file_hash}/{stem}.wav", stem_bytes,
-                    file_options={"content-type": "audio/wav", "upsert": "true"},
+                    file_options={"content-type": "audio/wav", "upsert": True},
                 )
                 log.info("[stems] Cached %s in Supabase", stem)
             except Exception as cache_exc:
