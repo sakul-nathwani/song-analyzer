@@ -866,6 +866,7 @@ def build_comparison_prompt(
     n_refs: int = 1,
     ref_stems: dict | None = None,
     wip_stems: dict | None = None,
+    feedback_focus: list[str] | None = None,
 ) -> str:
     ref_label = f"Averaged Target ({n_refs} references)" if n_refs > 1 else "Reference Track"
 
@@ -894,8 +895,24 @@ def build_comparison_prompt(
         parts.append(f"consistency {round(sc.get('consistency', 0) * 100)}%")
         return " | ".join(parts)
 
-    return f"""You are an expert music producer and audio engineer.
+    if feedback_focus:
+        if "Overall" in feedback_focus:
+            _focus_directive = (
+                "\nThis is a work in progress. Give balanced feedback across all areas. "
+                "Always frame your feedback as feedback on a WIP track.\n"
+            )
+        else:
+            focus_list = ", ".join(feedback_focus)
+            _focus_directive = (
+                f"\nThis is a work in progress. The user wants feedback specifically on: {focus_list}. "
+                "Do NOT give detailed mixing feedback unless Mixing was selected. "
+                "Focus your analysis on what was selected.\n"
+            )
+    else:
+        _focus_directive = ""
 
+    return f"""You are an expert music producer and audio engineer.
+{_focus_directive}
 IMPORTANT: Begin your response with a priority scores block, then the full markdown analysis.
 
 <priority_scores>
@@ -990,7 +1007,7 @@ def _cleanup_old_jobs() -> None:
             pass
 
 
-def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep_analysis: bool = False) -> None:
+def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep_analysis: bool = False, feedback_focus: list[str] | None = None) -> None:
     """Blocking worker — FastAPI runs sync BackgroundTasks in a thread pool."""
     deadline = time.time() + _MAX_ANALYSIS_SECONDS
     try:
@@ -1120,6 +1137,7 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
             ref_analysis, wip_analysis, n_refs=n_refs,
             ref_stems=ref_stems or None,
             wip_stems=wip_stems or None,
+            feedback_focus=feedback_focus or None,
         )
         client = anthropic.Anthropic()
         response = client.messages.create(
@@ -1175,6 +1193,7 @@ async def analyze(
     references: List[UploadFile] = File(...),
     wip: UploadFile = File(...),
     deep_analysis: bool = Form(False),
+    feedback_focus: List[str] = Form(default=[]),
 ):
     # Concurrency cap
     if not _job_semaphore.acquire(blocking=False):
@@ -1242,7 +1261,7 @@ async def analyze(
     })
 
     # Background task owns the semaphore from here; it will release in its finally block
-    background_tasks.add_task(_run_analysis, job_id, ref_paths, wip_path, len(references), deep_analysis)
+    background_tasks.add_task(_run_analysis, job_id, ref_paths, wip_path, len(references), deep_analysis, feedback_focus)
     return {"job_id": job_id}
 
 

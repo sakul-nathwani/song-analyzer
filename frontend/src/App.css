@@ -1834,3 +1834,66 @@ body {
   cursor: default;
   pointer-events: none;
 }
+
+/* ── Feedback focus selector ───────────────────────────────────────────────── */
+
+.feedback-focus-section {
+  margin: 20px 0 4px;
+}
+
+.feedback-focus-heading {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  margin-bottom: 10px;
+}
+
+.feedback-focus-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.focus-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.03);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  user-select: none;
+}
+
+.focus-option input[type="checkbox"] {
+  display: none;
+}
+
+.focus-option:hover {
+  border-color: rgba(255,255,255,0.2);
+  background: rgba(255,255,255,0.06);
+}
+
+.focus-option.checked {
+  border-color: var(--purple);
+  background: rgba(108,99,255,0.12);
+}
+
+.focus-option-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.focus-option.checked .focus-option-label {
+  color: #a89fff;
+}
+
+.focus-option-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+}

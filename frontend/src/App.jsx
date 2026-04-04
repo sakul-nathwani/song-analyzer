@@ -825,6 +825,7 @@ export default function App() {
   const [stemError,      setStemError]      = useState(null);
   const [activeTab,      setActiveTab]      = useState("overview");
   const [deepAnalysis,   setDeepAnalysis]   = useState(false);
+  const [feedbackFocus,  setFeedbackFocus]  = useState([]);
   const [jobId,          setJobId]          = useState(null);
   const [error,          setError]          = useState("");
   const [elapsed,        setElapsed]        = useState(0);
@@ -860,7 +861,8 @@ export default function App() {
   const setRefAt  = (i, file) => { const updated = [...refFiles]; updated[i] = file; setRefFiles(updated); };
 
   const validRefs  = refFiles.filter(Boolean);
-  const canAnalyze = validRefs.length > 0 && wipFile && !isAnalyzing;
+  const filesReady = validRefs.length > 0 && !!wipFile;
+  const canAnalyze = filesReady && feedbackFocus.length > 0 && !isAnalyzing;
 
   const saveToHistory = (entry) => {
     const next = [entry, ...history].slice(0, 20);
@@ -908,6 +910,7 @@ export default function App() {
     validRefs.forEach((f) => formData.append("references", f));
     formData.append("wip", wipFile);
     formData.append("deep_analysis", deepAnalysis ? "true" : "false");
+    feedbackFocus.forEach((f) => formData.append("feedback_focus", f));
 
     try {
       const res = await fetch("/analyze", { method: "POST", body: formData });
@@ -1041,6 +1044,35 @@ export default function App() {
             />
           </div>
 
+          {filesReady && (
+            <div className="feedback-focus-section">
+              <div className="feedback-focus-heading">What do you want feedback on?</div>
+              <div className="feedback-focus-options">
+                {[
+                  { value: "Arrangement", desc: "structure, sections, energy flow" },
+                  { value: "Sound Design", desc: "synths, layers, textures" },
+                  { value: "Mixing", desc: "levels, EQ, space" },
+                  { value: "Overall", desc: "a bit of everything" },
+                ].map(({ value, desc }) => {
+                  const checked = feedbackFocus.includes(value);
+                  const toggle = () =>
+                    setFeedbackFocus(
+                      checked
+                        ? feedbackFocus.filter((f) => f !== value)
+                        : [...feedbackFocus, value]
+                    );
+                  return (
+                    <label key={value} className={`focus-option ${checked ? "checked" : ""}`}>
+                      <input type="checkbox" checked={checked} onChange={toggle} />
+                      <span className="focus-option-label">{value}</span>
+                      <span className="focus-option-desc">{desc}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <div className="analyze-row">
             <button
               className={`analyze-btn ${canAnalyze ? "active" : ""} ${isAnalyzing ? "loading" : ""}`}
@@ -1102,11 +1134,11 @@ export default function App() {
           <section className="results-tabs-section">
             <div className="tab-bar">
               {[
-                { id: "overview",   label: "Overview"    },
-                { id: "frequency",  label: "Frequency"   },
-                { id: "stems",      label: "Stems"       },
-                { id: "feedback",   label: "AI Feedback" },
-              ].map(({ id, label }) => (
+                { id: "overview",   label: "Overview",    show: true },
+                { id: "frequency",  label: "Frequency",   show: feedbackFocus.includes("Mixing") },
+                { id: "stems",      label: "Stems",       show: feedbackFocus.includes("Sound Design") || feedbackFocus.includes("Mixing") },
+                { id: "feedback",   label: "AI Feedback", show: true },
+              ].filter(({ show }) => show).map(({ id, label }) => (
                 <button
                   key={id}
                   className={`tab-btn${activeTab === id ? " active" : ""}`}
