@@ -326,49 +326,34 @@ function sectionChipColor(label) {
 function WaveformChart({ refAnalysis, wipAnalysis }) {
   if (!refAnalysis?.energy_profile?.length || !wipAnalysis?.energy_profile?.length) return null;
 
-  const W = 860, H = 150;
-  const PL = 40, PR = 12, PT = 12, PB = 28;
-  const PW = W - PL - PR;
-  const PH = H - PT - PB;
+  const W = 860, H = 120;
 
   const refP = refAnalysis.energy_profile;
   const wipP = wipAnalysis.energy_profile;
 
-  // Use actual audio duration so section markers near the end aren't clipped
   const maxTime = Math.max(
-    refAnalysis.duration_seconds ?? 0,
-    wipAnalysis.duration_seconds ?? 0,
     refP.at(-1)?.time ?? 0,
     wipP.at(-1)?.time ?? 0,
     1
   );
   const maxEnergy = Math.max(...refP.map((p) => p.energy), ...wipP.map((p) => p.energy), 1e-9);
 
-  const tx = (t) => (PL + (t / maxTime) * PW).toFixed(1);
-  const ty = (e) => (PT + PH - (e / maxEnergy) * PH).toFixed(1);
+  const tx = (t) => ((t / maxTime) * W).toFixed(1);
+  const ty = (e) => (H - (e / maxEnergy) * H).toFixed(1);
 
   const linePath = (pts) =>
     pts.length === 0 ? "" : "M " + pts.map((p) => `${tx(p.time)},${ty(p.energy)}`).join(" L ");
 
   const fillPath = (pts) => {
     if (!pts.length) return "";
-    const y0 = (PT + PH).toFixed(1);
     const line = pts.map((p) => `${tx(p.time)},${ty(p.energy)}`).join(" L ");
-    return `M ${tx(pts[0].time)},${y0} L ${line} L ${tx(pts.at(-1).time)},${y0} Z`;
+    return `M ${tx(pts[0].time)},${H} L ${line} L ${tx(pts.at(-1).time)},${H} Z`;
   };
-
-  const tickInterval = maxTime > 180 ? 60 : 30;
-  const xTicks = [];
-  for (let t = 0; t <= maxTime; t += tickInterval) {
-    const m = Math.floor(t / 60);
-    const s = t % 60;
-    xTicks.push({ x: tx(t), label: m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${t}s` });
-  }
 
   return (
     <div className="waveform-section">
       <div className="freq-header">
-        <span className="freq-title">Energy Envelope</span>
+        <span className="freq-title">Waveform</span>
         <div className="freq-legend">
           <span className="legend-dot ref-dot" /> Reference
           <span className="legend-dot wip-dot" /> WIP
@@ -376,81 +361,10 @@ function WaveformChart({ refAnalysis, wipAnalysis }) {
       </div>
       <div className="waveform-chart-wrap">
         <svg viewBox={`0 0 ${W} ${H}`} className="waveform-svg" preserveAspectRatio="none">
-          {/* Y grid */}
-          {[0.25, 0.5, 0.75, 1.0].map((pct) => {
-            const y = ty(maxEnergy * pct);
-            return (
-              <g key={pct}>
-                <line x1={PL} y1={y} x2={W - PR} y2={y} stroke="rgba(255,255,255,0.05)" strokeWidth="1" />
-                <text x={PL - 5} y={Number(y) + 4} textAnchor="end" fill="rgba(255,255,255,0.25)" fontSize="9">
-                  {Math.round(pct * 100)}%
-                </text>
-              </g>
-            );
-          })}
-
-          {/* Fills */}
-          <path d={fillPath(refP)} fill="rgba(108,99,255,0.07)" />
-          <path d={fillPath(wipP)} fill="rgba(255,101,132,0.07)" />
-
-          {/* Section markers — Ref (purple, lines only — drawn first so WIP labels sit on top) */}
-          {(refAnalysis.sections ?? []).slice(1).map((sec, i) => (
-            <line key={`rs${i}`} x1={tx(sec.start)} y1={PT} x2={tx(sec.start)} y2={PT + PH}
-              stroke="rgba(108,99,255,0.2)" strokeWidth="1" strokeDasharray="3,3" />
-          ))}
-
-          {/* Section markers — WIP (pink lines + labels for every section) */}
-          {(() => {
-            const secs = wipAnalysis.sections ?? [];
-            let lastLabelX = -999;
-            let rowIndex = 0;
-            const yRows = [PT + 10, PT + 21, PT + 32];
-            return secs.map((sec, i) => {
-              const xVal = i === 0 ? PL + 3 : Number(tx(sec.start)) + 3;
-              const showLabel = xVal - lastLabelX >= 28;
-              if (showLabel) {
-                lastLabelX = xVal;
-                rowIndex = (rowIndex + 1) % yRows.length;
-              }
-              return (
-                <g key={`ws${i}`}>
-                  {i > 0 && (
-                    <line x1={tx(sec.start)} y1={PT} x2={tx(sec.start)} y2={PT + PH}
-                      stroke="rgba(255,101,132,0.35)" strokeWidth="1" strokeDasharray="3,3" />
-                  )}
-                  {showLabel && (
-                    <text
-                      x={xVal}
-                      y={yRows[rowIndex]}
-                      fill="rgba(255,101,132,0.7)"
-                      fontSize="8.5"
-                    >
-                      {sec.label}
-                    </text>
-                  )}
-                </g>
-              );
-            });
-          })()}
-
-          {/* Lines */}
+          <path d={fillPath(refP)} fill="rgba(108,99,255,0.12)" />
+          <path d={fillPath(wipP)} fill="rgba(255,101,132,0.12)" />
           <path d={linePath(refP)} fill="none" stroke="#6c63ff" strokeWidth="1.5" />
           <path d={linePath(wipP)} fill="none" stroke="#ff6584" strokeWidth="1.5" />
-
-          {/* Axes */}
-          <line x1={PL} y1={PT} x2={PL} y2={PT + PH} stroke="rgba(255,255,255,0.12)" strokeWidth="1" />
-          <line x1={PL} y1={PT + PH} x2={W - PR} y2={PT + PH} stroke="rgba(255,255,255,0.12)" strokeWidth="1" />
-
-          {/* X ticks */}
-          {xTicks.map((tk, i) => (
-            <g key={i}>
-              <line x1={tk.x} y1={PT + PH} x2={tk.x} y2={PT + PH + 4}
-                stroke="rgba(255,255,255,0.2)" strokeWidth="1" />
-              <text x={tk.x} y={PT + PH + 14} textAnchor="middle" fill="rgba(255,255,255,0.3)" fontSize="9">
-                {tk.label}
-              </text>
-            </g>
-          ))}
         </svg>
       </div>
     </div>

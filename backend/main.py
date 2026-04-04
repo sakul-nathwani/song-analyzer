@@ -911,7 +911,20 @@ def build_comparison_prompt(
     else:
         _focus_directive = ""
 
-    return f"""You are an expert music producer and audio engineer.
+    return f"""You are an expert music producer and audio engineer giving feedback on a work in progress (WIP) track.
+
+Core principles — follow these strictly:
+1. Always treat the WIP as a work in progress, not a finished track. Never evaluate it as if it were complete.
+2. Use the reference track as a SONIC benchmark only — not a structural template. Do NOT flag differences in arrangement structure, section length, section count, or song order as problems. A longer verse or different number of sections is not an issue.
+3. Compare the sonic elements and layers between the two tracks. Specifically call out:
+   - Percussive elements present in the reference but missing or thin in the WIP (e.g. "the reference has a layered percussion loop in the verse; your WIP currently only has a kick")
+   - Bass layers — how many layers and what types does the reference use vs the WIP
+   - Lead sounds — how rich or layered they are in each
+   - Atmospheric elements — pads, reverb tails, FX, ambience, textures
+   - Any other sonic elements that give the reference its fullness or energy that the WIP currently lacks
+4. Be descriptive about what sounds ARE present in the WIP. Don't just say "your drop is lacking energy" — say "your drop currently has a supersaw lead and a kick, but the reference has layered bass, a secondary lead, and a percussion loop on top of that."
+5. Suggestions must be possibilities, not corrections. Use language like "you might consider adding...", "one direction could be...", "the reference achieves X by using Y, which could be worth exploring."
+6. Never penalize unique creative choices. If the WIP does something differently from the reference in an interesting way, acknowledge it positively.
 {_focus_directive}
 IMPORTANT: Begin your response with a priority scores block, then the full markdown analysis.
 
@@ -945,7 +958,7 @@ IMPORTANT: Begin your response with a priority scores block, then the full markd
 {fmt_sections(wip_analysis)}
 
 ---
-Section note: labels are EDM-structure heuristics (Intro/Verse/Buildup/Drop/Breakdown/Outro) derived from relative energy and position. Treat them as starting context, not ground truth — reference actual energy and frequency values when giving feedback.
+Section note: labels are EDM-structure heuristics (Intro/Verse/Buildup/Drop/Breakdown/Outro) derived from relative energy and position. Treat them as starting context, not ground truth. Use section boundaries to understand where in the track to look for sonic differences — do NOT use them to evaluate arrangement structure or flag structural differences between the tracks.
 
 ---
 After the <priority_scores> block, provide your full analysis structured as:
@@ -959,7 +972,7 @@ After the <priority_scores> block, provide your full analysis structured as:
 ### 📐 Structure & Energy Flow
 ### 🔧 Top 3 Priority Actions
 
-Be direct, technical, and specific. Use actual numbers from the analyses.
+Be direct, technical, and specific. Use actual numbers from the analyses. Frame all suggestions as possibilities to explore, not corrections to make. Acknowledge any interesting or unique creative choices in the WIP positively.
 """ + _build_stem_prompt_section(ref_stems, wip_stems)
 
 
