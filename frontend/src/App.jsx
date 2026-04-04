@@ -733,7 +733,7 @@ export default function App() {
   const [refFiles,       setRefFiles]       = useState([null]);
   const [wipFile,        setWipFile]        = useState(null);
   const [stage,          setStageState]     = useState("idle");
-  const [suggestions,    setSuggestions]    = useState("");
+  const [feedbackSections, setFeedbackSections] = useState(null);
   const [refAnalysis,    setRefAnalysis]    = useState(null);
   const [wipAnalysis,    setWipAnalysis]    = useState(null);
   const [priorityScores, setPriorityScores] = useState([]);
@@ -798,7 +798,7 @@ export default function App() {
     }
     setStage("idle");
     setJobId(null);
-    setSuggestions("");
+    setFeedbackSections(null);
     setRefAnalysis(null);
     setWipAnalysis(null);
     setPriorityScores([]);
@@ -812,7 +812,7 @@ export default function App() {
     if (!canAnalyze) return;
 
     setStage("uploading");
-    setSuggestions("");
+    setFeedbackSections(null);
     setRefAnalysis(null);
     setWipAnalysis(null);
     setPriorityScores([]);
@@ -865,7 +865,7 @@ export default function App() {
             const scores = data.result.priority_scores || [];
             setRefAnalysis(data.result.reference);
             setWipAnalysis(data.result.wip);
-            setSuggestions(data.result.suggestions);
+            setFeedbackSections(data.result.feedback_sections || null);
             setPriorityScores(scores);
             setStemAnalyses(data.result.stem_analyses || null);
             setStemError(data.stem_error || data.result?.stem_error || null);
@@ -1048,12 +1048,16 @@ export default function App() {
         {/* Tabbed results */}
         {stage === "done" && refAnalysis && wipAnalysis && (
           <section className="results-tabs-section">
+            <PriorityScoresPanel scores={priorityScores} />
+
             <div className="tab-bar">
               {[
-                { id: "overview",   label: "Overview",    show: true },
-                { id: "frequency",  label: "Frequency",   show: feedbackFocus.includes("Mixing") },
-                { id: "stems",      label: "Stems",       show: feedbackFocus.includes("Sound Design") || feedbackFocus.includes("Mixing") },
-                { id: "feedback",   label: "AI Feedback", show: true },
+                { id: "overview",      label: "Overview",      show: true },
+                { id: "frequency",     label: "Frequency",     show: feedbackFocus.includes("Mixing") },
+                { id: "stems",         label: "Stems",         show: feedbackFocus.includes("Sound Design") || feedbackFocus.includes("Mixing") },
+                { id: "arrangement",   label: "Arrangement",   show: feedbackFocus.includes("Arrangement") || feedbackFocus.includes("Overall") },
+                { id: "sound-design",  label: "Sound Design",  show: feedbackFocus.includes("Sound Design") || feedbackFocus.includes("Overall") },
+                { id: "mixing",        label: "Mixing",        show: feedbackFocus.includes("Mixing") || feedbackFocus.includes("Overall") },
               ].filter(({ show }) => show).map(({ id, label }) => (
                 <button
                   key={id}
@@ -1069,12 +1073,8 @@ export default function App() {
 
               {activeTab === "overview" && (
                 <>
-                  <PriorityScoresPanel scores={priorityScores} />
                   <WaveformChart refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
                   <SectionComparisonPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
-                  {(feedbackFocus.includes("Mixing") || feedbackFocus.includes("Overall")) && (
-                    <SidechainPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
-                  )}
                 </>
               )}
 
@@ -1128,20 +1128,42 @@ export default function App() {
                 </>
               )}
 
-              {activeTab === "feedback" && (
+              {activeTab === "arrangement" && (
+                <div className="suggestions-card">
+                  <div className="markdown-body">
+                    <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={MD_COMPONENTS}>
+                      {feedbackSections?.arrangement || ""}
+                    </ReactMarkdown>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === "sound-design" && (
+                <div className="suggestions-card">
+                  <div className="markdown-body">
+                    <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={MD_COMPONENTS}>
+                      {feedbackSections?.sound_design || ""}
+                    </ReactMarkdown>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === "mixing" && (
                 <>
+                  <SidechainPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
                   <div className="suggestions-card">
                     <div className="markdown-body">
                       <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={MD_COMPONENTS}>
-                        {suggestions}
+                        {feedbackSections?.mixing || ""}
                       </ReactMarkdown>
                     </div>
                   </div>
-                  <ChatPanel jobId={jobId} />
                 </>
               )}
 
             </div>
+
+            <ChatPanel jobId={jobId} />
           </section>
         )}
       </main>

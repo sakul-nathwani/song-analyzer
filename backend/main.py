@@ -829,6 +829,18 @@ def _parse_priority_scores(text: str) -> list:
     return []
 
 
+def _parse_feedback_sections(text: str) -> dict:
+    sections = {}
+    for key, tag in [
+        ("arrangement", "arrangement_feedback"),
+        ("sound_design", "sound_design_feedback"),
+        ("mixing",       "mixing_feedback"),
+    ]:
+        m = re.search(rf"<{tag}>\s*(.*?)\s*</{tag}>", text, re.DOTALL)
+        sections[key] = m.group(1).strip() if m else ""
+    return sections
+
+
 def _build_stem_prompt_section(ref_stems: dict | None, wip_stems: dict | None) -> str:
     if not ref_stems and not wip_stems:
         return ""
@@ -961,16 +973,19 @@ IMPORTANT: Begin your response with a priority scores block, then the full markd
 Section note: labels are EDM-structure heuristics (Intro/Verse/Buildup/Drop/Breakdown/Outro) derived from relative energy and position. Treat them as starting context, not ground truth. Use section boundaries to understand where in the track to look for sonic differences — do NOT use them to evaluate arrangement structure or flag structural differences between the tracks.
 
 ---
-After the <priority_scores> block, provide your full analysis structured as:
+After the <priority_scores> block, provide your feedback in three XML-tagged sections. Always populate all three fully with detailed analysis.
 
-### 🔧 Top 3 Priority Actions
-### 🎚️ Mix & Loudness
-### 🎛️ Frequency Balance & EQ
-### 🥁 Rhythm & Groove
-### 🔊 Sidechain & Compression
-### 🎵 Harmonic Content & Arrangement
-### ✨ Brightness & Presence
-### 📐 Structure & Energy Flow
+<arrangement_feedback>
+Feedback on song structure, energy flow, section transitions, pacing, and arrangement choices. Use sub-headings as needed (e.g. ### 📐 Structure & Energy Flow, ### 🎵 Harmonic Content & Arrangement).
+</arrangement_feedback>
+
+<sound_design_feedback>
+Feedback on synths, layers, textures, sound selection, and which sonic elements are present vs what could enrich the track. Be specific about what is actually in the WIP and what the reference has that the WIP lacks. Use sub-headings as needed (e.g. ### ✨ Sonic Layers & Texture, ### 🥁 Rhythm & Groove).
+</sound_design_feedback>
+
+<mixing_feedback>
+Feedback on levels, EQ, frequency balance, loudness, sidechain compression, stereo field, and dynamics. Use sub-headings as needed (e.g. ### 🎚️ Mix & Loudness, ### 🎛️ Frequency Balance & EQ, ### 🔊 Sidechain & Compression, ### ✨ Brightness & Presence).
+</mixing_feedback>
 
 Be direct, technical, and specific. Use actual numbers from the analyses. Frame all suggestions as possibilities to explore, not corrections to make. Acknowledge any interesting or unique creative choices in the WIP positively.
 """ + _build_stem_prompt_section(ref_stems, wip_stems)
@@ -1160,23 +1175,30 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
         )
         raw_text = next(b.text for b in response.content if b.type == "text")
 
-        priority_scores = _parse_priority_scores(raw_text)
-        suggestions = re.sub(
-            r"<priority_scores>.*?</priority_scores>\s*", "", raw_text, flags=re.DOTALL
-        ).strip()
+        priority_scores   = _parse_priority_scores(raw_text)
+        feedback_sections = _parse_feedback_sections(raw_text)
+        # Concatenate all sections for chat context
+        suggestions = "\n\n".join(
+            s for s in [
+                feedback_sections.get("arrangement", ""),
+                feedback_sections.get("sound_design", ""),
+                feedback_sections.get("mixing", ""),
+            ] if s
+        )
 
         log.info("[job %s] Analysis complete — writing result", job_id[:8])
         job.update({
             "status": "done",
             "stage":  "done",
             "result": {
-                "reference":       ref_analysis,
-                "wip":             wip_analysis,
-                "suggestions":     suggestions,
-                "priority_scores": priority_scores,
-                "n_refs":          n_refs,
-                "stem_analyses":   stem_analyses_result,
-                "stem_error":      stem_error_msg,
+                "reference":        ref_analysis,
+                "wip":              wip_analysis,
+                "suggestions":      suggestions,
+                "feedback_sections": feedback_sections,
+                "priority_scores":  priority_scores,
+                "n_refs":           n_refs,
+                "stem_analyses":    stem_analyses_result,
+                "stem_error":       stem_error_msg,
             },
         })
         _write_job(job_id, job)
