@@ -1070,6 +1070,9 @@ export default function App() {
                   <PriorityScoresPanel scores={priorityScores} />
                   <WaveformChart refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
                   <SectionComparisonPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
+                  {(feedbackFocus.includes("Mixing") || feedbackFocus.includes("Overall")) && (
+                    <SidechainPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
+                  )}
                 </>
               )}
 

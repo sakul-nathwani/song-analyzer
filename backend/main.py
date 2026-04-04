@@ -963,6 +963,7 @@ Section note: labels are EDM-structure heuristics (Intro/Verse/Buildup/Drop/Brea
 ---
 After the <priority_scores> block, provide your full analysis structured as:
 
+### 🔧 Top 3 Priority Actions
 ### 🎚️ Mix & Loudness
 ### 🎛️ Frequency Balance & EQ
 ### 🥁 Rhythm & Groove
@@ -970,7 +971,6 @@ After the <priority_scores> block, provide your full analysis structured as:
 ### 🎵 Harmonic Content & Arrangement
 ### ✨ Brightness & Presence
 ### 📐 Structure & Energy Flow
-### 🔧 Top 3 Priority Actions
 
 Be direct, technical, and specific. Use actual numbers from the analyses. Frame all suggestions as possibilities to explore, not corrections to make. Acknowledge any interesting or unique creative choices in the WIP positively.
 """ + _build_stem_prompt_section(ref_stems, wip_stems)
