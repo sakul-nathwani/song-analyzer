@@ -1198,6 +1198,7 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
 # ── Endpoints ──────────────────────────────────────────────────────────────
 
 @app.post("/analyze")
+@limiter.limit("10/minute")
 @limiter.limit("10/hour")
 @limiter.limit("30/day")
 async def analyze(
