@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { useUser, SignInButton, SignUpButton, UserButton } from "@clerk/clerk-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
@@ -729,6 +730,29 @@ const freqLabels = [
   ["Highs",     "highs_pct"],
 ];
 
+// ── Limit modal ────────────────────────────────────────────────────────────
+
+function LimitModal({ onClose }) {
+  return (
+    <div className="limit-modal-overlay" onClick={onClose}>
+      <div className="limit-modal" onClick={(e) => e.stopPropagation()}>
+        <button className="limit-modal-close" onClick={onClose}>✕</button>
+        <div className="limit-modal-icon">🔒</div>
+        <h2 className="limit-modal-title">Free analyses used up</h2>
+        <p className="limit-modal-body">
+          You've used your free analyses. Create a free account to get 5 analyses per day.
+        </p>
+        <SignUpButton mode="modal">
+          <button className="limit-modal-cta">Sign Up — It's Free</button>
+        </SignUpButton>
+        <SignInButton mode="modal">
+          <button className="limit-modal-signin">Already have an account? Sign in</button>
+        </SignInButton>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [refFiles,       setRefFiles]       = useState([null]);
   const [wipFile,        setWipFile]        = useState(null);
@@ -750,6 +774,22 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem("songAnalyzerHistory") || "[]"); }
     catch { return []; }
   });
+  const [showLimitModal, setShowLimitModal] = useState(false);
+  const [userUsage,      setUserUsage]      = useState(null);
+
+  const { isSignedIn, user } = useUser();
+
+  const fetchUserUsage = useCallback(async (userId) => {
+    try {
+      const res = await fetch(`/usage/${userId}`);
+      if (res.ok) setUserUsage(await res.json());
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (isSignedIn && user?.id) fetchUserUsage(user.id);
+    else setUserUsage(null);
+  }, [isSignedIn, user?.id, fetchUserUsage]);
 
   const timerRef = useRef(null);
   const pollRef  = useRef(null);
@@ -811,6 +851,17 @@ export default function App() {
   const handleAnalyze = async () => {
     if (!canAnalyze) return;
 
+    // Check anonymous limits before uploading
+    if (!isSignedIn) {
+      if (deepAnalysis) {
+        const stemCount = parseInt(localStorage.getItem("mixref_anon_stem_count") || "0", 10);
+        if (stemCount >= 2) { setShowLimitModal(true); return; }
+      } else {
+        const anonCount = parseInt(localStorage.getItem("mixref_anon_count") || "0", 10);
+        if (anonCount >= 3) { setShowLimitModal(true); return; }
+      }
+    }
+
     setStage("uploading");
     setFeedbackSections(null);
     setRefAnalysis(null);
@@ -827,6 +878,9 @@ export default function App() {
     formData.append("wip", wipFile);
     formData.append("deep_analysis", deepAnalysis ? "true" : "false");
     feedbackFocus.forEach((f) => formData.append("feedback_focus", f));
+    if (isSignedIn && user?.id) {
+      formData.append("clerk_user_id", user.id);
+    }
 
     try {
       const res = await fetch("/analyze", { method: "POST", body: formData });
@@ -870,6 +924,18 @@ export default function App() {
             setStemAnalyses(data.result.stem_analyses || null);
             setStemError(data.stem_error || data.result?.stem_error || null);
             setStage("done");
+            // Update usage counters
+            if (!isSignedIn) {
+              if (deepAnalysis) {
+                const c = parseInt(localStorage.getItem("mixref_anon_stem_count") || "0", 10);
+                localStorage.setItem("mixref_anon_stem_count", String(c + 1));
+              } else {
+                const c = parseInt(localStorage.getItem("mixref_anon_count") || "0", 10);
+                localStorage.setItem("mixref_anon_count", String(c + 1));
+              }
+            } else if (user?.id) {
+              fetchUserUsage(user.id);
+            }
             saveToHistory({
               id:              job_id,
               timestamp:       new Date().toISOString(),
@@ -903,9 +969,28 @@ export default function App() {
               <span className="logo-icon">🎧</span>
               <span className="logo-text">Song Analyzer</span>
             </div>
-            <button className="history-btn" onClick={() => setShowHistory(true)}>
-              History {history.length > 0 && <span className="history-count">{history.length}</span>}
-            </button>
+            <div className="header-actions">
+              {isSignedIn && userUsage && (
+                <span className="usage-counter">
+                  {userUsage.analysis_count}/5 today
+                </span>
+              )}
+              <button className="history-btn" onClick={() => setShowHistory(true)}>
+                History {history.length > 0 && <span className="history-count">{history.length}</span>}
+              </button>
+              {isSignedIn ? (
+                <UserButton afterSignOutUrl="/" />
+              ) : (
+                <div className="auth-btns">
+                  <SignInButton mode="modal">
+                    <button className="auth-btn auth-btn--signin">Sign In</button>
+                  </SignInButton>
+                  <SignUpButton mode="modal">
+                    <button className="auth-btn auth-btn--signup">Sign Up</button>
+                  </SignUpButton>
+                </div>
+              )}
+            </div>
           </div>
           <p className="header-subtitle">
             AI-powered music production feedback — compare your WIP to a reference track
@@ -919,6 +1004,10 @@ export default function App() {
           onClear={clearHistory}
           onClose={() => setShowHistory(false)}
         />
+      )}
+
+      {showLimitModal && (
+        <LimitModal onClose={() => setShowLimitModal(false)} />
       )}
 
       <main className="app-main">

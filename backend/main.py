@@ -24,6 +24,7 @@ log = logging.getLogger("song-analyzer")
 import numpy as np
 import librosa
 import anthropic
+from supabase import create_client
 from fastapi import BackgroundTasks, FastAPI, File, Form, Request, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -43,6 +44,8 @@ def _log_env_diagnostics() -> None:
         "REPLICATE_API_KEY":    os.environ.get("REPLICATE_API_KEY", ""),
         "REPLICATE_TOKEN":      os.environ.get("REPLICATE_TOKEN", ""),
         "REPLICATE_KEY":        os.environ.get("REPLICATE_KEY", ""),
+        "SUPABASE_URL":         os.environ.get("SUPABASE_URL", ""),
+        "SUPABASE_KEY":         os.environ.get("SUPABASE_KEY", ""),
     }
     log.info("=== Environment variable diagnostics ===")
     for name, val in checks.items():
@@ -75,6 +78,75 @@ def _get_replicate_token() -> str:
                 log.info("[stems] Found Replicate token under '%s' instead of 'REPLICATE_API_TOKEN'", name)
             return val
     return ""
+
+
+# ── Supabase usage tracking ────────────────────────────────────────────────
+
+def _get_supabase():
+    url = os.environ.get("SUPABASE_URL", "")
+    key = os.environ.get("SUPABASE_KEY", "")
+    if not url or not key:
+        return None
+    return create_client(url, key)
+
+
+def _get_or_create_usage(sb, user_id: str) -> dict:
+    from datetime import date
+    today = date.today().isoformat()
+    resp = sb.table("user_usage").select("*").eq("user_id", user_id).execute()
+    if resp.data:
+        row = resp.data[0]
+        if row.get("last_reset_date") != today:
+            sb.table("user_usage").update({
+                "analysis_count": 0,
+                "stem_count": 0,
+                "last_reset_date": today,
+            }).eq("user_id", user_id).execute()
+            row["analysis_count"] = 0
+            row["stem_count"] = 0
+            row["last_reset_date"] = today
+        return row
+    new_row = {
+        "id": uuid.uuid4().hex,
+        "user_id": user_id,
+        "analysis_count": 0,
+        "stem_count": 0,
+        "last_reset_date": today,
+    }
+    sb.table("user_usage").insert(new_row).execute()
+    return new_row
+
+
+def _check_usage(user_id: str, uses_stems: bool) -> None:
+    """Raise HTTPException 429 if the user has exceeded their daily limits."""
+    sb = _get_supabase()
+    if sb is None:
+        log.warning("[usage] Supabase not configured — skipping limit check for user %s", user_id[:8])
+        return
+    try:
+        row = _get_or_create_usage(sb, user_id)
+        if row["analysis_count"] >= 5:
+            raise HTTPException(status_code=429, detail="Daily limit reached. Upgrade for more.")
+        if uses_stems and row["stem_count"] >= 3:
+            raise HTTPException(status_code=429, detail="Daily stem limit reached.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.error("[usage] check_usage failed for user %s: %s", user_id[:8], exc)
+
+
+def _increment_usage(user_id: str, uses_stems: bool) -> None:
+    sb = _get_supabase()
+    if sb is None:
+        return
+    try:
+        row = _get_or_create_usage(sb, user_id)
+        updates: dict = {"analysis_count": row["analysis_count"] + 1}
+        if uses_stems:
+            updates["stem_count"] = row["stem_count"] + 1
+        sb.table("user_usage").update(updates).eq("user_id", user_id).execute()
+    except Exception as exc:
+        log.error("[usage] increment_usage failed for user %s: %s", user_id[:8], exc)
 
 
 # ── Rate limiter (per-IP, in-memory) ───────────────────────────────────────
@@ -1035,7 +1107,7 @@ def _cleanup_old_jobs() -> None:
             pass
 
 
-def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep_analysis: bool = False, feedback_focus: list[str] | None = None) -> None:
+def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep_analysis: bool = False, feedback_focus: list[str] | None = None, clerk_user_id: str | None = None) -> None:
     """Blocking worker — FastAPI runs sync BackgroundTasks in a thread pool."""
     deadline = time.time() + _MAX_ANALYSIS_SECONDS
     try:
@@ -1202,6 +1274,8 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
             },
         })
         _write_job(job_id, job)
+        if clerk_user_id:
+            _increment_usage(clerk_user_id, deep_analysis)
 
     except Exception as exc:
         job = _read_job(job_id) or {}
@@ -1230,7 +1304,12 @@ async def analyze(
     wip: UploadFile = File(...),
     deep_analysis: bool = Form(False),
     feedback_focus: List[str] = Form(default=[]),
+    clerk_user_id: str | None = Form(None),
 ):
+    # Per-user daily limit check (logged-in users only)
+    if clerk_user_id:
+        _check_usage(clerk_user_id, deep_analysis)
+
     # Concurrency cap
     if not _job_semaphore.acquire(blocking=False):
         raise HTTPException(
@@ -1297,7 +1376,7 @@ async def analyze(
     })
 
     # Background task owns the semaphore from here; it will release in its finally block
-    background_tasks.add_task(_run_analysis, job_id, ref_paths, wip_path, len(references), deep_analysis, feedback_focus)
+    background_tasks.add_task(_run_analysis, job_id, ref_paths, wip_path, len(references), deep_analysis, feedback_focus, clerk_user_id)
     return {"job_id": job_id}
 
 
@@ -1372,6 +1451,30 @@ def chat(job_id: str, request: ChatRequest):
         messages=[{"role": m.role, "content": m.content} for m in request.messages],
     )
     return {"reply": response.content[0].text}
+
+
+@app.get("/usage/{clerk_user_id}")
+def get_usage(clerk_user_id: str):
+    from datetime import date
+    today = date.today().isoformat()
+    sb = _get_supabase()
+    if sb is None:
+        return {"analysis_count": 0, "stem_count": 0, "last_reset_date": today}
+    try:
+        resp = sb.table("user_usage").select("*").eq("user_id", clerk_user_id).execute()
+        if not resp.data:
+            return {"analysis_count": 0, "stem_count": 0, "last_reset_date": today}
+        row = resp.data[0]
+        if row.get("last_reset_date") != today:
+            return {"analysis_count": 0, "stem_count": 0, "last_reset_date": today}
+        return {
+            "analysis_count": row["analysis_count"],
+            "stem_count":     row["stem_count"],
+            "last_reset_date": row["last_reset_date"],
+        }
+    except Exception as exc:
+        log.error("[usage] get_usage failed for user %s: %s", clerk_user_id[:8], exc)
+        return {"analysis_count": 0, "stem_count": 0, "last_reset_date": today}
 
 
 # ── Static file serving (production) ──────────────────────────────────────

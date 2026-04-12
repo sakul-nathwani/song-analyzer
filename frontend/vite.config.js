@@ -6,6 +6,11 @@ export default defineConfig({
   server: {
     proxy: {
       "/analyze": "http://localhost:8000",
+      "/status":  "http://localhost:8000",
+      "/cancel":  "http://localhost:8000",
+      "/chat":    "http://localhost:8000",
+      "/health":  "http://localhost:8000",
+      "/usage":   "http://localhost:8000",
     },
   },
 });
