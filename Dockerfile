@@ -8,6 +8,12 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 
 COPY frontend/ ./
+
+# Receive the Clerk publishable key as a build arg so Vite can bake it
+# into the bundle via import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
+ARG VITE_CLERK_PUBLISHABLE_KEY
+ENV VITE_CLERK_PUBLISHABLE_KEY=$VITE_CLERK_PUBLISHABLE_KEY
+
 RUN npm run build
 RUN test -f dist/index.html   # catch silent build failures
 
