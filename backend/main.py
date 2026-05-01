@@ -253,39 +253,84 @@ def _freq_balance_from_stft(stft_slice: np.ndarray, freqs: np.ndarray) -> dict:
     }
 
 
+# ── Drop-detection tuning constants ──────────────────────────────────────────
+# Phase 1 fixes for drop over-detection. Adjust these to tune behaviour:
+
+# Minimum wall-clock duration a segment must span to be eligible as a drop.
+# Prevents short transients / transition hits from being labeled as drops.
+MIN_DROP_DURATION_SECONDS = 8.0
+
+# If two drop runs are within this many seconds of each other (end-of-A to
+# start-of-B), they are merged into a single drop. Handles cases where a single
+# musical drop is split by one low-energy gap segment.
+DROP_MERGE_GAP_SECONDS = 12.0
+
+# Adaptive threshold multipliers based on the track's dynamic variation.
+# CoV (coefficient of variation) = std / mean of per-segment RMS energies.
+# Flat-dynamics tracks have a low CoV, so we raise the multiplier to avoid
+# calling every high section a "drop".
+DROP_THRESH_FLAT_COV   = 0.20   # CoV below this → track is dynamically flat
+DROP_THRESH_FLAT_MULT  = 1.45   # multiplier used when CoV < DROP_THRESH_FLAT_COV
+DROP_THRESH_NORMAL_MULT = 1.25  # multiplier used otherwise
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 def _heuristic_label_sections(sections: list, energies: list) -> list:
     """
     Drop-focused labeler. Identifies sustained high-energy regions as Drops (Drop 1, Drop 2, …).
     Everything else gets a generic label. Only the Drops are named precisely.
 
-    A "Drop" is a run of consecutive segments that all meet the energy threshold and
-    start after the first 20 s of the song (to exclude the intro region).
+    Three-stage filter applied before final labeling:
+      1. Adaptive threshold  — multiplier scales up on flat-dynamics tracks so the
+                               bar to qualify as a drop is higher when everything is loud.
+      2. Minimum duration guard — segments shorter than MIN_DROP_DURATION_SECONDS are
+                               excluded even if they clear the energy threshold.
+      3. Consecutive merge   — adjacent qualifying segments become one drop run.
+      4. Proximity merge     — drop runs within DROP_MERGE_GAP_SECONDS of each other
+                               are merged into a single drop (handles one-gap splits).
+    Drop labels are assigned sequentially AFTER all merging is complete.
     """
     n = len(sections)
     if n == 0:
         return []
 
-    labels  = [""] * n
-    mean_e  = float(np.mean(energies))
+    labels = [""] * n
+    mean_e = float(np.mean(energies))
+    MIN_START = 20.0   # ignore anything in the first 20 s (intro region)
 
-    # Energy threshold — a segment must exceed this to be a drop candidate.
-    # 1.25× the song mean filters out verses/buildups while catching typical drops.
-    DROP_THRESH = mean_e * 1.25
-    MIN_START   = 20.0   # ignore anything in the first 20 s (intro region)
+    # ── Fix 3: Adaptive threshold ────────────────────────────────────────────
+    # Compute coefficient of variation (CoV) across all segment energies.
+    # A low CoV means the track has flat dynamics — raise the multiplier so we
+    # don't mislabel every slightly-above-average section as a drop.
+    std_e = float(np.std(energies)) if len(energies) > 1 else 0.0
+    cov   = std_e / mean_e if mean_e > 0 else 0.0
+    if cov < DROP_THRESH_FLAT_COV:
+        drop_mult = DROP_THRESH_FLAT_MULT    # flat track — stricter bar
+    else:
+        drop_mult = DROP_THRESH_NORMAL_MULT  # normal dynamics
+    DROP_THRESH = mean_e * drop_mult
 
-    # 1. Collect candidates: high-energy segments that start after the intro
+    # ── 1. Collect candidates: high-energy segments that start after the intro ─
+    # Fix 1: also require the segment to meet the minimum duration threshold.
     candidates = [
         i for i in range(n)
-        if energies[i] >= DROP_THRESH and sections[i]["start"] >= MIN_START
+        if (energies[i] >= DROP_THRESH
+            and sections[i]["start"] >= MIN_START
+            and (sections[i]["end"] - sections[i]["start"]) >= MIN_DROP_DURATION_SECONDS)
     ]
 
-    # 2. Fallback: if nothing clears the threshold, pick the single loudest segment after 20 s
+    # ── 2. Fallback: if nothing clears the threshold, pick the single loudest  ─
+    # segment after 20 s that also meets the minimum duration requirement.
     if not candidates:
-        after_intro = [i for i in range(n) if sections[i]["start"] >= MIN_START]
+        after_intro = [
+            i for i in range(n)
+            if (sections[i]["start"] >= MIN_START
+                and (sections[i]["end"] - sections[i]["start"]) >= MIN_DROP_DURATION_SECONDS)
+        ]
         if after_intro:
             candidates = [max(after_intro, key=lambda i: energies[i])]
 
-    # 3. Group consecutive candidates into runs (each run becomes one Drop)
+    # ── 3. Consecutive merge: group adjacent candidates into runs ─────────────
     runs: list[list[int]] = []
     if candidates:
         run = [candidates[0]]
@@ -297,20 +342,44 @@ def _heuristic_label_sections(sections: list, energies: list) -> list:
                 run = [c]
         runs.append(run)
 
-    # 4. Sort runs by position and assign Drop labels
     runs.sort(key=lambda r: sections[r[0]]["start"])
-    for drop_num, run in enumerate(runs, start=1):
-        for i in run:
-            labels[i] = f"Drop {drop_num}"
 
-    # 5. First section → Intro (overrides any spurious drop assignment)
+    # ── 4. Fix 2: Proximity merge ─────────────────────────────────────────────
+    # If two consecutive drop runs end/start within DROP_MERGE_GAP_SECONDS,
+    # collapse them (and all segments between them) into a single run.
+    merged = True
+    while merged and len(runs) > 1:
+        merged = False
+        new_runs: list[list[int]] = []
+        i = 0
+        while i < len(runs):
+            if i + 1 < len(runs):
+                end_a   = sections[runs[i][-1]]["end"]
+                start_b = sections[runs[i + 1][0]]["start"]
+                if start_b - end_a <= DROP_MERGE_GAP_SECONDS:
+                    # Merge: span all segment indices between the two runs
+                    merged_run = list(range(runs[i][0], runs[i + 1][-1] + 1))
+                    new_runs.append(merged_run)
+                    i += 2
+                    merged = True
+                    continue
+            new_runs.append(runs[i])
+            i += 1
+        runs = new_runs
+
+    # ── 5. Assign sequential Drop labels AFTER all merging ───────────────────
+    for drop_num, run in enumerate(runs, start=1):
+        for idx in run:
+            labels[idx] = f"Drop {drop_num}"
+
+    # ── 6. First section → Intro (overrides any spurious drop assignment) ────
     labels[0] = "Intro"
 
-    # 6. Last section → Outro if it's low-energy
+    # ── 7. Last section → Outro if it's low-energy ───────────────────────────
     if n > 1 and not labels[-1] and energies[-1] < mean_e * 0.75:
         labels[-1] = "Outro"
 
-    # 7. Everything unlabeled → generic "Section N"
+    # ── 8. Everything unlabeled → generic "Section N" ────────────────────────
     section_count = 0
     for i in range(n):
         if not labels[i]:
