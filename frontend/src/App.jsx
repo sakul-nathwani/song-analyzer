@@ -766,6 +766,7 @@ export default function App() {
   const [activeTab,      setActiveTab]      = useState("overview");
   const [deepAnalysis,   setDeepAnalysis]   = useState(false);
   const [feedbackFocus,  setFeedbackFocus]  = useState([]);
+  const [subgenre,       setSubgenre]       = useState(null);
   const [jobId,          setJobId]          = useState(null);
   const [error,          setError]          = useState("");
   const [elapsed,        setElapsed]        = useState(0);
@@ -818,7 +819,7 @@ export default function App() {
 
   const validRefs  = refFiles.filter(Boolean);
   const filesReady = validRefs.length > 0 && !!wipFile;
-  const canAnalyze = filesReady && feedbackFocus.length > 0 && !isAnalyzing;
+  const canAnalyze = filesReady && subgenre !== null && feedbackFocus.length > 0 && !isAnalyzing;
 
   const saveToHistory = (entry) => {
     const next = [entry, ...history].slice(0, 20);
@@ -877,6 +878,7 @@ export default function App() {
     validRefs.forEach((f) => formData.append("references", f));
     formData.append("wip", wipFile);
     formData.append("deep_analysis", deepAnalysis ? "true" : "false");
+    formData.append("subgenre", subgenre || "general");
     feedbackFocus.forEach((f) => formData.append("feedback_focus", f));
     if (isSignedIn && user?.id) {
       formData.append("clerk_user_id", user.id);
@@ -1050,32 +1052,65 @@ export default function App() {
           </div>
 
           {filesReady && (
-            <div className="feedback-focus-section">
-              <div className="feedback-focus-heading">What do you want feedback on?</div>
-              <div className="feedback-focus-options">
-                {[
-                  { value: "Arrangement", desc: "structure, sections, energy flow" },
-                  { value: "Sound Design", desc: "synths, layers, textures" },
-                  { value: "Mixing", desc: "levels, EQ, space" },
-                  { value: "Overall", desc: "a bit of everything" },
-                ].map(({ value, desc }) => {
-                  const checked = feedbackFocus.includes(value);
-                  const toggle = () =>
-                    setFeedbackFocus(
-                      checked
-                        ? feedbackFocus.filter((f) => f !== value)
-                        : [...feedbackFocus, value]
+            <>
+              <div className="feedback-focus-section">
+                <div className="feedback-focus-heading">Select a subgenre</div>
+                <div className="feedback-focus-options">
+                  {[
+                    { value: "general",       label: "General",       desc: "no subgenre-specific guidance" },
+                    { value: "heavy_dubstep", label: "Heavy Dubstep", desc: "Excision, Subtronics · 145–150 BPM" },
+                    { value: "trap",          label: "Trap",          desc: "RL Grime, ISOXO · 140–160 BPM" },
+                    { value: "melodic_bass",  label: "Melodic Bass",  desc: "Illenium, Roy Knox · 140–155 BPM" },
+                    { value: "bass_house",    label: "Bass House",    desc: "Knock2, Ray Volpe · 126–130 BPM" },
+                    { value: "speed_garage",  label: "Speed Garage",  desc: "UK garage swing · 130–140 BPM" },
+                  ].map(({ value, label, desc }) => {
+                    const selected = subgenre === value;
+                    return (
+                      <button
+                        key={value}
+                        type="button"
+                        className={`focus-option${selected ? " checked" : ""}`}
+                        onClick={() => setSubgenre(selected ? null : value)}
+                      >
+                        <span className="focus-option-label">{label}</span>
+                        <span className="focus-option-desc">{desc}</span>
+                      </button>
                     );
-                  return (
-                    <label key={value} className={`focus-option ${checked ? "checked" : ""}`}>
-                      <input type="checkbox" checked={checked} onChange={toggle} />
-                      <span className="focus-option-label">{value}</span>
-                      <span className="focus-option-desc">{desc}</span>
-                    </label>
-                  );
-                })}
+                  })}
+                </div>
               </div>
-            </div>
+
+              {subgenre === null ? (
+                <div className="subgenre-prompt">Select a subgenre to continue.</div>
+              ) : (
+                <div className="feedback-focus-section">
+                  <div className="feedback-focus-heading">What do you want feedback on?</div>
+                  <div className="feedback-focus-options">
+                    {[
+                      { value: "Arrangement", desc: "structure, sections, energy flow" },
+                      { value: "Sound Design", desc: "synths, layers, textures" },
+                      { value: "Mixing", desc: "levels, EQ, space" },
+                      { value: "Overall", desc: "a bit of everything" },
+                    ].map(({ value, desc }) => {
+                      const checked = feedbackFocus.includes(value);
+                      const toggle = () =>
+                        setFeedbackFocus(
+                          checked
+                            ? feedbackFocus.filter((f) => f !== value)
+                            : [...feedbackFocus, value]
+                        );
+                      return (
+                        <label key={value} className={`focus-option ${checked ? "checked" : ""}`}>
+                          <input type="checkbox" checked={checked} onChange={toggle} />
+                          <span className="focus-option-label">{value}</span>
+                          <span className="focus-option-desc">{desc}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </>
           )}
 
           <div className="analyze-row">

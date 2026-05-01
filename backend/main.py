@@ -24,6 +24,7 @@ log = logging.getLogger("song-analyzer")
 import numpy as np
 import librosa
 import anthropic
+from subgenre_profiles import SUBGENRE_PROFILES
 from supabase import create_client
 from fastapi import BackgroundTasks, FastAPI, File, Form, Request, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -951,6 +952,7 @@ def build_comparison_prompt(
     ref_stems: dict | None = None,
     wip_stems: dict | None = None,
     feedback_focus: list[str] | None = None,
+    subgenre: str | None = None,
 ) -> str:
     ref_label = f"Averaged Target ({n_refs} references)" if n_refs > 1 else "Reference Track"
 
@@ -995,6 +997,50 @@ def build_comparison_prompt(
     else:
         _focus_directive = ""
 
+    # Build subgenre context block
+    _subgenre_block = ""
+    _bpm_flag = ""
+    profile = SUBGENRE_PROFILES.get(subgenre or "general", {})
+    if profile.get("apply_subgenre_analysis", True) and subgenre and subgenre != "general":
+        bpm_min, bpm_max = profile["typical_bpm"]
+        wip_bpm = wip_analysis.get("tempo_bpm", 0)
+        try:
+            wip_bpm_val = float(wip_bpm)
+        except (TypeError, ValueError):
+            wip_bpm_val = 0
+        if wip_bpm_val > 0:
+            below = bpm_min - wip_bpm_val
+            above = wip_bpm_val - bpm_max
+            gap = max(below, above, 0)
+            if gap >= 10:
+                if below > 0:
+                    direction = f"{wip_bpm} BPM, which is {int(below)} BPM below the typical {bpm_min}–{bpm_max} BPM range"
+                else:
+                    direction = f"{wip_bpm} BPM, which is {int(above)} BPM above the typical {bpm_min}–{bpm_max} BPM range"
+                _bpm_flag = (
+                    f"\n⚠️ BPM NOTE: This track is at {direction} for {profile['name']}. "
+                    f"Consider whether this BPM choice fits the subgenre, or whether you are intentionally blending styles. "
+                    f"Mention this prominently in your feedback.\n"
+                )
+
+        _subgenre_block = f"""
+---
+## Subgenre Context: {profile['name']}
+The user is producing a {profile['name']} track. Use the following profile as additional context when evaluating the WIP — these are genre conventions, not rigid rules. The reference track remains the primary sonic benchmark.
+
+- Reference artists: {profile.get('reference_artists', 'N/A')}
+- Typical BPM: {bpm_min}–{bpm_max} ({profile.get('feel', '')})
+- Drums: {profile.get('drums', 'N/A')}
+- Bass: {profile.get('bass', 'N/A')}
+- Leads: {profile.get('leads', 'N/A')}
+- Mix: {profile.get('mix', 'N/A')}
+- Structure: {profile.get('structure', 'N/A')}
+
+Evaluate the WIP against BOTH the reference track AND these subgenre conventions. If the WIP deviates from subgenre norms in interesting or intentional ways, acknowledge that positively. Do not treat these conventions as a rigid rulebook — they are benchmarks to inform your feedback.
+{_bpm_flag}
+---
+"""
+
     return f"""You are an expert music producer and audio engineer giving feedback on a work in progress (WIP) track.
 
 Core principles — follow these strictly:
@@ -1009,7 +1055,7 @@ Core principles — follow these strictly:
 4. Be descriptive about what sounds ARE present in the WIP. Don't just say "your drop is lacking energy" — say "your drop currently has a supersaw lead and a kick, but the reference has layered bass, a secondary lead, and a percussion loop on top of that."
 5. Suggestions must be possibilities, not corrections. Use language like "you might consider adding...", "one direction could be...", "the reference achieves X by using Y, which could be worth exploring."
 6. Never penalize unique creative choices. If the WIP does something differently from the reference in an interesting way, acknowledge it positively.
-{_focus_directive}
+{_focus_directive}{_subgenre_block}
 IMPORTANT: Begin your response with a priority scores block, then the full markdown analysis.
 
 <priority_scores>
@@ -1107,7 +1153,7 @@ def _cleanup_old_jobs() -> None:
             pass
 
 
-def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep_analysis: bool = False, feedback_focus: list[str] | None = None, clerk_user_id: str | None = None) -> None:
+def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep_analysis: bool = False, feedback_focus: list[str] | None = None, clerk_user_id: str | None = None, subgenre: str | None = None) -> None:
     """Blocking worker — FastAPI runs sync BackgroundTasks in a thread pool."""
     deadline = time.time() + _MAX_ANALYSIS_SECONDS
     try:
@@ -1238,6 +1284,7 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
             ref_stems=ref_stems or None,
             wip_stems=wip_stems or None,
             feedback_focus=feedback_focus or None,
+            subgenre=subgenre or None,
         )
         client = anthropic.Anthropic()
         response = client.messages.create(
@@ -1305,6 +1352,7 @@ async def analyze(
     deep_analysis: bool = Form(False),
     feedback_focus: List[str] = Form(default=[]),
     clerk_user_id: str | None = Form(None),
+    subgenre: str = Form(default="general"),
 ):
     # Per-user daily limit check (logged-in users only)
     if clerk_user_id:
@@ -1376,7 +1424,7 @@ async def analyze(
     })
 
     # Background task owns the semaphore from here; it will release in its finally block
-    background_tasks.add_task(_run_analysis, job_id, ref_paths, wip_path, len(references), deep_analysis, feedback_focus, clerk_user_id)
+    background_tasks.add_task(_run_analysis, job_id, ref_paths, wip_path, len(references), deep_analysis, feedback_focus, clerk_user_id, subgenre)
     return {"job_id": job_id}
 
 

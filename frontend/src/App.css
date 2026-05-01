@@ -1978,6 +1978,8 @@ body {
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
   user-select: none;
+  font-family: inherit;
+  text-align: left;
 }
 
 .focus-option input[type="checkbox"] {
@@ -2007,4 +2009,11 @@ body {
 .focus-option-desc {
   font-size: 11px;
   color: var(--text-muted);
+}
+
+.subgenre-prompt {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 4px 0 8px;
+  opacity: 0.7;
 }
