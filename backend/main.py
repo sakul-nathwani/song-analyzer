@@ -24,7 +24,7 @@ log = logging.getLogger("song-analyzer")
 import numpy as np
 import librosa
 import anthropic
-from subgenre_profiles import SUBGENRE_PROFILES
+from backend.subgenre_profiles import SUBGENRE_PROFILES
 from supabase import create_client
 from fastapi import BackgroundTasks, FastAPI, File, Form, Request, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
