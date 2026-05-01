@@ -151,11 +151,25 @@ def _increment_usage(user_id: str, uses_stems: bool) -> None:
 
 
 # ── Rate limiter (per-IP, in-memory) ───────────────────────────────────────
-limiter = Limiter(key_func=get_remote_address, default_limits=["30/minute"])
+_RATE_LIMITING_DISABLED = os.getenv("DISABLE_RATE_LIMITING", "").lower() == "true"
+
+if _RATE_LIMITING_DISABLED:
+    log.warning("⚠️  RATE LIMITING DISABLED via DISABLE_RATE_LIMITING env var")
+
+    class _NoOpLimiter:
+        """Drop-in replacement for slowapi.Limiter that never enforces limits."""
+        def limit(self, *args, **kwargs):
+            def decorator(func): return func
+            return decorator
+
+    limiter = _NoOpLimiter()
+else:
+    limiter = Limiter(key_func=get_remote_address, default_limits=["30/minute"])
 
 app = FastAPI()
-app.state.limiter = limiter
-app.add_middleware(SlowAPIMiddleware)
+if not _RATE_LIMITING_DISABLED:
+    app.state.limiter = limiter
+    app.add_middleware(SlowAPIMiddleware)
 
 @app.exception_handler(RateLimitExceeded)
 async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
