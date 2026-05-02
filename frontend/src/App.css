@@ -107,69 +107,6 @@ body {
 }
 .auth-btn--signup:hover { background: #5b52e8; }
 
-/* ── Limit modal ── */
-.limit-modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.7);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
-
-.limit-modal {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 40px 36px;
-  max-width: 420px;
-  width: 90%;
-  text-align: center;
-  position: relative;
-}
-
-.limit-modal-close {
-  position: absolute;
-  top: 14px;
-  right: 14px;
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  font-size: 16px;
-  cursor: pointer;
-}
-.limit-modal-close:hover { color: var(--text); }
-
-.limit-modal-icon { font-size: 40px; margin-bottom: 16px; }
-.limit-modal-title { font-size: 20px; font-weight: 700; margin-bottom: 10px; }
-.limit-modal-body  { color: var(--text-muted); font-size: 14px; line-height: 1.6; margin-bottom: 24px; }
-
-.limit-modal-cta {
-  display: block;
-  width: 100%;
-  padding: 12px;
-  background: var(--purple);
-  color: #fff;
-  border: none;
-  border-radius: 10px;
-  font-size: 15px;
-  font-weight: 600;
-  cursor: pointer;
-  margin-bottom: 10px;
-  transition: var(--transition);
-}
-.limit-modal-cta:hover { background: #5b52e8; }
-
-.limit-modal-signin {
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  font-size: 13px;
-  cursor: pointer;
-  text-decoration: underline;
-}
-.limit-modal-signin:hover { color: var(--text); }
 
 /* ── Main ── */
 .app-main {

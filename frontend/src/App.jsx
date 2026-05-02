@@ -738,28 +738,6 @@ const freqLabels = [
   ["Highs",     "highs_pct"],
 ];
 
-// ── Limit modal ────────────────────────────────────────────────────────────
-
-function LimitModal({ onClose }) {
-  return (
-    <div className="limit-modal-overlay" onClick={onClose}>
-      <div className="limit-modal" onClick={(e) => e.stopPropagation()}>
-        <button className="limit-modal-close" onClick={onClose}>✕</button>
-        <div className="limit-modal-icon">🔒</div>
-        <h2 className="limit-modal-title">Free analyses used up</h2>
-        <p className="limit-modal-body">
-          You've used your free analyses. Create a free account to get 5 analyses per day.
-        </p>
-        <SignUpButton mode="modal">
-          <button className="limit-modal-cta">Sign Up — It's Free</button>
-        </SignUpButton>
-        <SignInButton mode="modal">
-          <button className="limit-modal-signin">Already have an account? Sign in</button>
-        </SignInButton>
-      </div>
-    </div>
-  );
-}
 
 export default function App() {
   const [refFiles,       setRefFiles]       = useState([null]);
@@ -783,7 +761,6 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem("songAnalyzerHistory") || "[]"); }
     catch { return []; }
   });
-  const [showLimitModal, setShowLimitModal] = useState(false);
   const [userUsage,      setUserUsage]      = useState(null);
 
   // ── Focus Mode state ────────────────────────────────────────────────────
@@ -928,17 +905,6 @@ export default function App() {
   const handleAnalyze = async () => {
     if (!canAnalyze) return;
 
-    // Check anonymous limits before uploading
-    if (!isSignedIn) {
-      if (deepAnalysis) {
-        const stemCount = parseInt(localStorage.getItem("mixref_anon_stem_count") || "0", 10);
-        if (stemCount >= 2) { setShowLimitModal(true); return; }
-      } else {
-        const anonCount = parseInt(localStorage.getItem("mixref_anon_count") || "0", 10);
-        if (anonCount >= 3) { setShowLimitModal(true); return; }
-      }
-    }
-
     setStage("uploading");
     setFeedbackSections(null);
     setRefAnalysis(null);
@@ -1022,15 +988,7 @@ export default function App() {
             setFocusModeInfo(data.result.focus_context || null);
             setStage("done");
             // Update usage counters
-            if (!isSignedIn) {
-              if (deepAnalysis) {
-                const c = parseInt(localStorage.getItem("mixref_anon_stem_count") || "0", 10);
-                localStorage.setItem("mixref_anon_stem_count", String(c + 1));
-              } else {
-                const c = parseInt(localStorage.getItem("mixref_anon_count") || "0", 10);
-                localStorage.setItem("mixref_anon_count", String(c + 1));
-              }
-            } else if (user?.id) {
+            if (user?.id) {
               fetchUserUsage(user.id);
             }
             saveToHistory({
@@ -1103,9 +1061,6 @@ export default function App() {
         />
       )}
 
-      {showLimitModal && (
-        <LimitModal onClose={() => setShowLimitModal(false)} />
-      )}
 
       <main className="app-main">
         {/* Upload */}
