@@ -493,6 +493,42 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
     return sections
 
 
+def _quick_section_detect(path: str) -> list:
+    """
+    Fast section detection for the /detect_sections endpoint.
+    Loads audio and runs section detection only — no stem separation or AI feedback.
+    """
+    y, sr = librosa.load(path, sr=22050, mono=True, duration=360)
+    hop_length = 512
+    stft_matrix = np.abs(librosa.stft(y, hop_length=hop_length))
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+    sections = detect_sections(y, sr, stft=stft_matrix, freqs=freqs, hop_length=hop_length)
+    return [
+        {
+            "label":  s["label"],
+            "start":  s["start"],
+            "end":    s["end"],
+            "energy": round(s["avg_energy"], 6),
+        }
+        for s in sections
+    ]
+
+
+def _slice_audio_to_tmp(path: str, start: float, end: float) -> str:
+    """
+    Load audio from path, slice to [start, end] seconds, and write to a new temp WAV file.
+    Returns the temp file path — caller is responsible for deletion.
+    """
+    import soundfile as sf
+    duration = max(0.1, end - start)
+    y, sr = librosa.load(path, sr=22050, mono=True, offset=start, duration=duration)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp_path = tmp.name
+    sf.write(tmp_path, y, sr, format="WAV", subtype="PCM_16")
+    log.info("[slice] %.1f–%.1fs → %s (%.1fs)", start, end, os.path.basename(tmp_path), duration)
+    return tmp_path
+
+
 def detect_sidechain(y, sr, tempo_bpm, beat_frames, stft, freqs, hop_length=512):
     """
     Detect sidechain compression by looking for rhythmic bass ducking
@@ -1028,6 +1064,15 @@ def _build_stem_prompt_section(ref_stems: dict | None, wip_stems: dict | None) -
     return "\n".join(lines)
 
 
+def _fmt_seconds(s) -> str:
+    """Format seconds as m:ss for prompt context."""
+    if s is None:
+        return "?"
+    m = int(s) // 60
+    sec = int(s) % 60
+    return f"{m}:{sec:02d}"
+
+
 def build_comparison_prompt(
     ref_analysis: dict,
     wip_analysis: dict,
@@ -1036,6 +1081,7 @@ def build_comparison_prompt(
     wip_stems: dict | None = None,
     feedback_focus: list[str] | None = None,
     subgenre: str | None = None,
+    focus_context: dict | None = None,
 ) -> str:
     ref_label = f"Averaged Target ({n_refs} references)" if n_refs > 1 else "Reference Track"
 
@@ -1124,6 +1170,31 @@ Evaluate the WIP against BOTH the reference track AND these subgenre conventions
 ---
 """
 
+    # Build focus context block
+    _focus_block = ""
+    if focus_context:
+        wip_lbl = focus_context.get("wip_label", "section")
+        ref_lbl = focus_context.get("ref_label", "section")
+        wip_range = (
+            f" ({_fmt_seconds(focus_context.get('wip_start'))}–{_fmt_seconds(focus_context.get('wip_end'))})"
+            if focus_context.get("wip_start") is not None else ""
+        )
+        ref_range = (
+            f" ({_fmt_seconds(focus_context.get('ref_start'))}–{_fmt_seconds(focus_context.get('ref_end'))})"
+            if focus_context.get("ref_start") is not None else ""
+        )
+        _focus_block = f"""
+---
+## Focus Mode — Section Analysis
+The user is analyzing a specific section, not the full track. Both audio inputs have been pre-sliced to the selected sections — treat the entire audio you received AS this section only.
+
+- **WIP section:** {wip_lbl}{wip_range}
+- **Reference section:** {ref_lbl}{ref_range}
+
+Provide feedback specifically about this section. Do NOT mention other sections of the track or comment on overall song structure. All feedback should be scoped to what you hear in these clips.
+---
+"""
+
     return f"""You are an expert music producer and audio engineer giving feedback on a work in progress (WIP) track.
 
 Core principles — follow these strictly:
@@ -1138,7 +1209,7 @@ Core principles — follow these strictly:
 4. Be descriptive about what sounds ARE present in the WIP. Don't just say "your drop is lacking energy" — say "your drop currently has a supersaw lead and a kick, but the reference has layered bass, a secondary lead, and a percussion loop on top of that."
 5. Suggestions must be possibilities, not corrections. Use language like "you might consider adding...", "one direction could be...", "the reference achieves X by using Y, which could be worth exploring."
 6. Never penalize unique creative choices. If the WIP does something differently from the reference in an interesting way, acknowledge it positively.
-{_focus_directive}{_subgenre_block}
+{_focus_directive}{_subgenre_block}{_focus_block}
 IMPORTANT: Begin your response with a priority scores block, then the full markdown analysis.
 
 <priority_scores>
@@ -1236,17 +1307,53 @@ def _cleanup_old_jobs() -> None:
             pass
 
 
-def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep_analysis: bool = False, feedback_focus: list[str] | None = None, clerk_user_id: str | None = None, subgenre: str | None = None) -> None:
+def _run_analysis(
+    job_id: str, ref_paths: list, wip_path: str, n_refs: int,
+    deep_analysis: bool = False,
+    feedback_focus: list[str] | None = None,
+    clerk_user_id: str | None = None,
+    subgenre: str | None = None,
+    focus_mode: bool = False,
+    wip_section_start: float | None = None,
+    wip_section_end: float | None = None,
+    wip_section_label: str | None = None,
+    reference_section_start: float | None = None,
+    reference_section_end: float | None = None,
+    reference_section_label: str | None = None,
+) -> None:
     """Blocking worker — FastAPI runs sync BackgroundTasks in a thread pool."""
+    # Track ALL temp files for cleanup: originals passed in + any sliced versions created here
+    _orig_ref_paths = list(ref_paths)
+    _orig_wip_path  = wip_path
+    _sliced_paths: list[str] = []
     deadline = time.time() + _MAX_ANALYSIS_SECONDS
     try:
         job = _read_job(job_id) or {}
         job["stage"] = "extracting"
         _write_job(job_id, job)
 
+        # ── Focus Mode: slice audio to the selected sections ──────────────────
+        if focus_mode:
+            if wip_section_start is not None and wip_section_end is not None:
+                sliced_wip = _slice_audio_to_tmp(wip_path, wip_section_start, wip_section_end)
+                _sliced_paths.append(sliced_wip)
+                wip_path = sliced_wip
+                log.info("[job %s] Focus Mode: WIP sliced → %s (%s–%ss)",
+                         job_id[:8], wip_section_label or "?", wip_section_start, wip_section_end)
+            if reference_section_start is not None and reference_section_end is not None:
+                new_ref_paths = []
+                for rp in ref_paths:
+                    sliced_ref = _slice_audio_to_tmp(rp, reference_section_start, reference_section_end)
+                    _sliced_paths.append(sliced_ref)
+                    new_ref_paths.append(sliced_ref)
+                ref_paths = new_ref_paths
+                log.info("[job %s] Focus Mode: refs sliced → %s (%s–%ss)",
+                         job_id[:8], reference_section_label or "?", reference_section_start, reference_section_end)
+
         all_paths = ref_paths + [wip_path]
         stem_error_msg: str | None = None
-        log.info("[job %s] Starting analysis: %d file(s), deep_analysis=%s", job_id[:8], len(all_paths), deep_analysis)
+        log.info("[job %s] Starting analysis: %d file(s), deep_analysis=%s, focus_mode=%s",
+                 job_id[:8], len(all_paths), deep_analysis, focus_mode)
 
         # Compute hashes up-front when stem caching is needed
         all_hashes = [_file_hash(p) for p in all_paths] if deep_analysis else []
@@ -1362,12 +1469,24 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
         if deep_analysis and (ref_stems or wip_stems):
             stem_analyses_result = {"reference": ref_stems, "wip": wip_stems}
 
+        focus_context = None
+        if focus_mode and wip_section_label:
+            focus_context = {
+                "wip_label": wip_section_label,
+                "wip_start": wip_section_start,
+                "wip_end":   wip_section_end,
+                "ref_label": reference_section_label or "full track",
+                "ref_start": reference_section_start,
+                "ref_end":   reference_section_end,
+            }
+
         prompt = build_comparison_prompt(
             ref_analysis, wip_analysis, n_refs=n_refs,
             ref_stems=ref_stems or None,
             wip_stems=wip_stems or None,
             feedback_focus=feedback_focus or None,
             subgenre=subgenre or None,
+            focus_context=focus_context,
         )
         client = anthropic.Anthropic()
         response = client.messages.create(
@@ -1401,6 +1520,7 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
                 "n_refs":           n_refs,
                 "stem_analyses":    stem_analyses_result,
                 "stem_error":       stem_error_msg,
+                "focus_context":    focus_context,
             },
         })
         _write_job(job_id, job)
@@ -1414,7 +1534,8 @@ def _run_analysis(job_id: str, ref_paths: list, wip_path: str, n_refs: int, deep
 
     finally:
         _job_semaphore.release()
-        for path in ref_paths + [wip_path]:
+        # Clean up all temp files: originals + any sliced versions
+        for path in _orig_ref_paths + [_orig_wip_path] + _sliced_paths:
             try:
                 os.unlink(path)
             except OSError:
@@ -1436,6 +1557,13 @@ async def analyze(
     feedback_focus: List[str] = Form(default=[]),
     clerk_user_id: str | None = Form(None),
     subgenre: str = Form(default="general"),
+    focus_mode: bool = Form(False),
+    wip_section_start: float | None = Form(None),
+    wip_section_end: float | None = Form(None),
+    wip_section_label: str | None = Form(None),
+    reference_section_start: float | None = Form(None),
+    reference_section_end: float | None = Form(None),
+    reference_section_label: str | None = Form(None),
 ):
     # Per-user daily limit check (logged-in users only)
     if clerk_user_id:
@@ -1507,8 +1635,78 @@ async def analyze(
     })
 
     # Background task owns the semaphore from here; it will release in its finally block
-    background_tasks.add_task(_run_analysis, job_id, ref_paths, wip_path, len(references), deep_analysis, feedback_focus, clerk_user_id, subgenre)
+    background_tasks.add_task(
+        _run_analysis,
+        job_id, ref_paths, wip_path, len(references),
+        deep_analysis, feedback_focus, clerk_user_id, subgenre,
+        focus_mode, wip_section_start, wip_section_end, wip_section_label,
+        reference_section_start, reference_section_end, reference_section_label,
+    )
     return {"job_id": job_id}
+
+
+@app.post("/detect_sections")
+@limiter.limit("20/minute")
+@limiter.limit("60/hour")
+async def detect_sections_endpoint(
+    request: Request,
+    references: List[UploadFile] = File(...),
+    wip: UploadFile = File(...),
+):
+    """
+    Lightweight section detection pre-pass for Focus Mode.
+    Returns detected sections for both tracks WITHOUT stem separation or AI feedback.
+    Intended to be fast (under 15 seconds for most tracks).
+    """
+    ref = references[0]
+    for upload in [ref, wip]:
+        ext = os.path.splitext(upload.filename or "")[1].lower()
+        if ext not in _ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type: {upload.filename}. Accepted: MP3, WAV, FLAC, AIFF",
+            )
+
+    async def _stream_to_tmp(upload: UploadFile, suffix: str) -> str:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            path = tmp.name
+            total = 0
+            while chunk := await upload.read(1024 * 1024):
+                total += len(chunk)
+                if total > _MAX_FILE_BYTES:
+                    tmp.close()
+                    os.unlink(path)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"'{upload.filename}' exceeds the 100 MB limit.",
+                    )
+                tmp.write(chunk)
+        return path
+
+    ref_path = await _stream_to_tmp(ref, os.path.splitext(ref.filename or ".wav")[1])
+    wip_path = await _stream_to_tmp(wip, os.path.splitext(wip.filename or ".wav")[1])
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ref_fut = pool.submit(_quick_section_detect, ref_path)
+            wip_fut = pool.submit(_quick_section_detect, wip_path)
+            try:
+                ref_sections = ref_fut.result(timeout=120)
+                wip_sections = wip_fut.result(timeout=120)
+            except Exception as exc:
+                log.error("[detect_sections] Failed: %s", exc)
+                raise HTTPException(status_code=500, detail=f"Section detection failed: {exc}")
+
+        return {
+            "wip_sections":       wip_sections,
+            "reference_sections": ref_sections,
+        }
+    finally:
+        for p in [ref_path, wip_path]:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
 
 @app.get("/status/{job_id}")

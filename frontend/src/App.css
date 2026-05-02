@@ -2017,3 +2017,218 @@ body {
   margin: 4px 0 8px;
   opacity: 0.7;
 }
+
+/* ── Focus Mode toggle ──────────────────────────────────────────────────── */
+
+.focus-mode-row {
+  margin: 16px 0 4px;
+}
+
+.focus-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.focus-mode-toggle.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.focus-mode-toggle input[type="checkbox"] {
+  display: none;
+}
+
+.focus-mode-track {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  transition: background var(--transition), border-color var(--transition);
+  flex-shrink: 0;
+}
+
+.focus-mode-toggle input:checked ~ .focus-mode-track {
+  background: color-mix(in srgb, var(--purple) 30%, var(--bg3));
+  border-color: var(--purple);
+}
+
+.focus-mode-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: var(--text-muted);
+  border-radius: 50%;
+  transition: transform var(--transition), background var(--transition);
+}
+
+.focus-mode-toggle input:checked ~ .focus-mode-track .focus-mode-thumb {
+  transform: translateX(18px);
+  background: var(--purple);
+}
+
+.focus-mode-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+}
+
+.focus-mode-sub {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+/* ── Section selection (Focus Mode) ──────────────────────────────────────── */
+
+.section-selection {
+  margin: 12px 0 4px;
+  padding: 16px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.section-detecting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 4px 0;
+}
+
+.section-detect-error {
+  background: rgba(255, 80, 80, 0.08);
+  border: 1px solid rgba(255, 80, 80, 0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #ff8080;
+  font-size: 13px;
+}
+
+.section-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 640px) {
+  .section-columns { grid-template-columns: 1fr; }
+}
+
+.section-col-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.section-col-req { color: var(--pink); font-weight: 600; text-transform: none; letter-spacing: 0; }
+.section-col-opt { color: var(--text-muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
+
+.section-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.section-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--transition), background var(--transition);
+  width: 100%;
+}
+
+.section-card:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.section-card.selected {
+  border-color: var(--purple);
+  background: rgba(108, 99, 255, 0.12);
+}
+
+.section-card-auto.selected {
+  border-color: var(--green);
+  background: rgba(67, 217, 173, 0.1);
+}
+
+.section-card-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+}
+
+.section-card.selected .section-card-label { color: #a89fff; }
+.section-card-auto.selected .section-card-label { color: var(--green); }
+
+.section-card-range {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.section-card-dur {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
+
+.section-nomatch-warning {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: rgba(255, 170, 0, 0.08);
+  border: 1px solid rgba(255, 170, 0, 0.3);
+  border-radius: 8px;
+  color: #ffcc44;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* ── Focus Mode result banner ─────────────────────────────────────────────── */
+
+.focus-mode-result-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  background: rgba(108, 99, 255, 0.1);
+  border: 1px solid rgba(108, 99, 255, 0.3);
+  border-radius: 10px;
+  font-size: 13px;
+  color: #a89fff;
+  flex-wrap: wrap;
+}
+
+.focus-mode-result-banner strong { color: var(--text); }
+
+.focus-mode-result-range {
+  color: var(--text-muted);
+  font-size: 12px;
+}

@@ -5,6 +5,14 @@ import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import "./App.css";
 
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function fmtTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
 // ── Upload box ─────────────────────────────────────────────────────────────
 
 function AudioUploadBox({ label, sublabel, file, onFileChange, color, icon }) {
@@ -778,6 +786,15 @@ export default function App() {
   const [showLimitModal, setShowLimitModal] = useState(false);
   const [userUsage,      setUserUsage]      = useState(null);
 
+  // ── Focus Mode state ────────────────────────────────────────────────────
+  const [focusMode,          setFocusMode]          = useState(false);
+  const [detectingSections,  setDetectingSections]  = useState(false);
+  const [detectedSections,   setDetectedSections]   = useState(null);
+  const [sectionDetectError, setSectionDetectError] = useState(null);
+  const [selectedWipSection, setSelectedWipSection] = useState(null);
+  const [selectedRefSection, setSelectedRefSection] = useState("auto");
+  const [focusModeInfo,      setFocusModeInfo]      = useState(null);
+
   const { isSignedIn, user } = useUser();
 
   const fetchUserUsage = useCallback(async (userId) => {
@@ -812,6 +829,56 @@ export default function App() {
 
   useEffect(() => { return () => clearInterval(pollRef.current); }, []);
 
+  // ── Section detection effect (Focus Mode) ────────────────────────────────
+  // Re-runs whenever focus mode toggles or files change
+  const sectionDetectKey = !focusMode ? "off" : [
+    wipFile ? `${wipFile.name}-${wipFile.size}` : "none",
+    refFiles.map((f) => (f ? `${f.name}-${f.size}` : "none")).join("|"),
+  ].join("|");
+
+  useEffect(() => {
+    if (!focusMode) {
+      setDetectingSections(false);
+      setDetectedSections(null);
+      setSectionDetectError(null);
+      setSelectedWipSection(null);
+      setSelectedRefSection("auto");
+      return;
+    }
+    const currentRefs = refFiles.filter(Boolean);
+    if (currentRefs.length === 0 || !wipFile) {
+      setDetectedSections(null);
+      setSectionDetectError(null);
+      setSelectedWipSection(null);
+      setSelectedRefSection("auto");
+      return;
+    }
+    setSelectedWipSection(null);
+    setSelectedRefSection("auto");
+    setDetectedSections(null);
+    setSectionDetectError(null);
+    setDetectingSections(true);
+
+    let cancelled = false;
+    const formData = new FormData();
+    currentRefs.forEach((f) => formData.append("references", f));
+    formData.append("wip", wipFile);
+
+    fetch("/detect_sections", { method: "POST", body: formData })
+      .then((res) => {
+        if (!res.ok)
+          return res.json().then((b) => {
+            throw new Error(b.detail || `Section detection failed (${res.status})`);
+          });
+        return res.json();
+      })
+      .then((data) => { if (!cancelled) setDetectedSections(data); })
+      .catch((err) => { if (!cancelled) setSectionDetectError(err.message); })
+      .finally(() => { if (!cancelled) setDetectingSections(false); });
+
+    return () => { cancelled = true; };
+  }, [sectionDetectKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Multiple ref helpers
   const addRef    = () => { if (refFiles.length < 3) setRefFiles([...refFiles, null]); };
   const removeRef = (i) => setRefFiles(refFiles.filter((_, idx) => idx !== i));
@@ -819,7 +886,15 @@ export default function App() {
 
   const validRefs  = refFiles.filter(Boolean);
   const filesReady = validRefs.length > 0 && !!wipFile;
-  const canAnalyze = filesReady && subgenre !== null && feedbackFocus.length > 0 && !isAnalyzing;
+
+  const focusModeReady = !focusMode || (() => {
+    if (detectingSections || sectionDetectError !== null) return false;
+    if (!selectedWipSection || !detectedSections) return false;
+    if (selectedRefSection !== "auto") return true;
+    return detectedSections.reference_sections.some((s) => s.label === selectedWipSection.label);
+  })();
+
+  const canAnalyze = filesReady && subgenre !== null && feedbackFocus.length > 0 && !isAnalyzing && focusModeReady;
 
   const saveToHistory = (entry) => {
     const next = [entry, ...history].slice(0, 20);
@@ -845,6 +920,7 @@ export default function App() {
     setPriorityScores([]);
     setStemAnalyses(null);
     setStemError(null);
+    setFocusModeInfo(null);
     setError("");
     setActiveTab("overview");
   };
@@ -870,6 +946,7 @@ export default function App() {
     setPriorityScores([]);
     setStemAnalyses(null);
     setStemError(null);
+    setFocusModeInfo(null);
     setJobId(null);
     setError("");
     setActiveTab("overview");
@@ -882,6 +959,23 @@ export default function App() {
     feedbackFocus.forEach((f) => formData.append("feedback_focus", f));
     if (isSignedIn && user?.id) {
       formData.append("clerk_user_id", user.id);
+    }
+
+    // Focus Mode params
+    if (focusMode && selectedWipSection) {
+      const resolvedRef =
+        selectedRefSection === "auto"
+          ? (detectedSections?.reference_sections.find((s) => s.label === selectedWipSection.label) || null)
+          : selectedRefSection;
+      formData.append("focus_mode", "true");
+      formData.append("wip_section_start", String(selectedWipSection.start));
+      formData.append("wip_section_end", String(selectedWipSection.end));
+      formData.append("wip_section_label", selectedWipSection.label);
+      if (resolvedRef) {
+        formData.append("reference_section_start", String(resolvedRef.start));
+        formData.append("reference_section_end", String(resolvedRef.end));
+        formData.append("reference_section_label", resolvedRef.label);
+      }
     }
 
     try {
@@ -925,6 +1019,7 @@ export default function App() {
             setPriorityScores(scores);
             setStemAnalyses(data.result.stem_analyses || null);
             setStemError(data.stem_error || data.result?.stem_error || null);
+            setFocusModeInfo(data.result.focus_context || null);
             setStage("done");
             // Update usage counters
             if (!isSignedIn) {
@@ -1080,6 +1175,122 @@ export default function App() {
                 </div>
               </div>
 
+            {/* ── Focus Mode toggle ── */}
+            <div className="focus-mode-row">
+              <label className={`focus-mode-toggle${isAnalyzing ? " disabled" : ""}`}>
+                <input
+                  type="checkbox"
+                  checked={focusMode}
+                  onChange={(e) => !isAnalyzing && setFocusMode(e.target.checked)}
+                  disabled={isAnalyzing}
+                />
+                <span className="focus-mode-track">
+                  <span className="focus-mode-thumb" />
+                </span>
+                <span className="focus-mode-label">
+                  Focus Mode
+                  <span className="focus-mode-sub">
+                    {focusMode ? "Select a section below to analyze." : "Analyze the full track."}
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            {/* ── Section selection (Focus Mode ON) ── */}
+            {focusMode && (
+              <div className="section-selection">
+                {detectingSections && (
+                  <div className="section-detecting">
+                    <span className="spinner" /> Detecting sections...
+                  </div>
+                )}
+                {sectionDetectError && (
+                  <div className="section-detect-error">
+                    <span className="error-icon">⚠</span> {sectionDetectError}
+                  </div>
+                )}
+                {detectedSections && !detectingSections && (
+                  <>
+                    <div className="section-columns">
+                      <div className="section-col">
+                        <div className="section-col-title">
+                          WIP Sections
+                          <span className="section-col-req"> — required</span>
+                        </div>
+                        <div className="section-cards">
+                          {detectedSections.wip_sections.map((sec) => {
+                            const isSelected =
+                              selectedWipSection?.start === sec.start &&
+                              selectedWipSection?.end === sec.end;
+                            return (
+                              <button
+                                key={`wip-${sec.start}`}
+                                type="button"
+                                className={`section-card${isSelected ? " selected" : ""}`}
+                                onClick={() => setSelectedWipSection(isSelected ? null : sec)}
+                              >
+                                <span className="section-card-label">{sec.label}</span>
+                                <span className="section-card-range">
+                                  {fmtTime(sec.start)} – {fmtTime(sec.end)}
+                                </span>
+                                <span className="section-card-dur">{Math.round(sec.end - sec.start)}s</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <div className="section-col">
+                        <div className="section-col-title">
+                          Reference Section
+                          <span className="section-col-opt"> — optional</span>
+                        </div>
+                        <div className="section-cards">
+                          <button
+                            type="button"
+                            className={`section-card section-card-auto${selectedRefSection === "auto" ? " selected" : ""}`}
+                            onClick={() => setSelectedRefSection("auto")}
+                          >
+                            <span className="section-card-label">Auto-match</span>
+                            <span className="section-card-range">Match WIP section type</span>
+                          </button>
+                          {detectedSections.reference_sections.map((sec) => {
+                            const isSelected =
+                              selectedRefSection !== "auto" &&
+                              selectedRefSection?.start === sec.start &&
+                              selectedRefSection?.end === sec.end;
+                            return (
+                              <button
+                                key={`ref-${sec.start}`}
+                                type="button"
+                                className={`section-card${isSelected ? " selected" : ""}`}
+                                onClick={() => setSelectedRefSection(sec)}
+                              >
+                                <span className="section-card-label">{sec.label}</span>
+                                <span className="section-card-range">
+                                  {fmtTime(sec.start)} – {fmtTime(sec.end)}
+                                </span>
+                                <span className="section-card-dur">{Math.round(sec.end - sec.start)}s</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    {selectedWipSection &&
+                      selectedRefSection === "auto" &&
+                      !detectedSections.reference_sections.some(
+                        (s) => s.label === selectedWipSection.label
+                      ) && (
+                        <div className="section-nomatch-warning">
+                          No matching section in reference for "{selectedWipSection.label}". Please select a reference section to compare against.
+                        </div>
+                      )}
+                  </>
+                )}
+              </div>
+            )}
+
               {subgenre === null ? (
                 <div className="subgenre-prompt">Select a subgenre to continue.</div>
               ) : (
@@ -1172,6 +1383,17 @@ export default function App() {
         {/* Tabbed results */}
         {stage === "done" && refAnalysis && wipAnalysis && (
           <section className="results-tabs-section">
+            {focusModeInfo && (
+              <div className="focus-mode-result-banner">
+                Focus Mode: <strong>{focusModeInfo.wip_label}</strong> vs{" "}
+                <strong>{focusModeInfo.ref_label}</strong>
+                {focusModeInfo.wip_start != null && (
+                  <span className="focus-mode-result-range">
+                    {" "}({fmtTime(focusModeInfo.wip_start)}–{fmtTime(focusModeInfo.wip_end)})
+                  </span>
+                )}
+              </div>
+            )}
             <PriorityScoresPanel scores={priorityScores} />
 
             <div className="tab-bar">
@@ -1198,7 +1420,9 @@ export default function App() {
               {activeTab === "overview" && (
                 <>
                   <WaveformChart refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
-                  <SectionComparisonPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
+                  {!focusModeInfo && (
+                    <SectionComparisonPanel refAnalysis={refAnalysis} wipAnalysis={wipAnalysis} />
+                  )}
                 </>
               )}
 
