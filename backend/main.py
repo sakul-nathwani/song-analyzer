@@ -490,6 +490,46 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
         sec.pop("_centroid_hz", None)
         sec.pop("_onset_rate",  None)
 
+    # ── Merge consecutive sections that share the same label ─────────────────
+    # A single musical drop often spans several agglomerative segments that all
+    # receive the label "Drop 1".  Keeping them separate causes the Section Type
+    # Comparison view to show "Drop 1 ×6" instead of "Drop 1 ×1" and floods the
+    # Focus Mode selector with identical-label cards.  Merging collapses them
+    # into one canonical section per contiguous same-label run.
+    if sections:
+        merged: list[dict] = [sections[0]]
+        for sec in sections[1:]:
+            prev = merged[-1]
+            if prev["label"] == sec["label"]:
+                # Duration-weighted averages for all numeric fields
+                pd = prev["end"] - prev["start"]          # prev duration
+                cd = sec["end"]  - sec["start"]           # curr duration
+                td = max(pd + cd, 1e-9)                   # total, guard /0
+                prev["avg_energy"] = round(
+                    (prev["avg_energy"] * pd + sec["avg_energy"] * cd) / td, 6
+                )
+                if "avg_loudness_db" in prev and "avg_loudness_db" in sec:
+                    prev["avg_loudness_db"] = round(
+                        (prev["avg_loudness_db"] * pd + sec["avg_loudness_db"] * cd) / td, 2
+                    )
+                if "frequency_balance" in prev and "frequency_balance" in sec:
+                    fb_p, fb_c = prev["frequency_balance"], sec["frequency_balance"]
+                    prev["frequency_balance"] = {
+                        k: round((fb_p.get(k, 0) * pd + fb_c.get(k, 0) * cd) / td, 2)
+                        for k in fb_p
+                    }
+                prev["end"]          = sec["end"]
+                prev["is_low_energy"] = prev["avg_energy"] < mean_e * 0.75
+            else:
+                merged.append(sec)
+        sections = merged
+
+    # Sanity check: warn loudly if any duplicate labels remain (regression guard)
+    label_counts = Counter(s["label"] for s in sections)
+    dupes = [lbl for lbl, cnt in label_counts.items() if cnt > 1]
+    if dupes:
+        log.warning("[sections] DUPLICATE LABELS after merge — this is a bug: %s", dupes)
+
     return sections
 
 
