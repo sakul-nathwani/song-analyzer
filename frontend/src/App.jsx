@@ -693,6 +693,55 @@ function StemAnalysisPanel({ stemAnalyses }) {
   );
 }
 
+// ── Resources: collapsible issue group ─────────────────────────────────────
+
+function ResourceGroup({ title, detail, resources: items }) {
+  const [open, setOpen] = useState(false);
+  const isVideo = (domain) => domain.includes("youtube.com") || domain.includes("youtu.be");
+
+  return (
+    <div className="resource-group">
+      <button className="resource-group-header" onClick={() => setOpen((o) => !o)}>
+        <div className="resource-group-header-text">
+          <span className="resource-group-title">{title}</span>
+          {detail && <span className="resource-group-detail">{detail}</span>}
+        </div>
+        <div className="resource-group-meta">
+          <span className="resource-group-count">{items.length} resource{items.length !== 1 ? "s" : ""}</span>
+          <span className={`resource-chevron${open ? " open" : ""}`}>›</span>
+        </div>
+      </button>
+
+      <div className={`resource-group-body${open ? " open" : ""}`}>
+        <div className="resource-group-body-inner">
+          {items.length === 0 ? (
+            <p className="resource-group-empty">No resources found for this.</p>
+          ) : (
+            <div className="resource-cards">
+              {items.map((r) => (
+                <a
+                  key={r.url}
+                  href={r.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="resource-card"
+                >
+                  <div className="resource-card-top">
+                    {isVideo(r.domain) && <span className="resource-card-badge video">▶ Video</span>}
+                  </div>
+                  <div className="resource-card-title">{r.title}</div>
+                  {r.snippet && <div className="resource-card-snippet">{r.snippet}</div>}
+                  <div className="resource-card-domain">{r.domain}</div>
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main app ───────────────────────────────────────────────────────────────
 
 // ── Markdown table renderer ────────────────────────────────────────────────
@@ -1510,29 +1559,8 @@ export default function App() {
                       <p>Could not load resources. Please try again.</p>
                     </div>
                   )}
-                  {!resourcesLoading && resources && resources.map(({ issue, resources: items }) => (
-                    <div key={issue} className="resource-group">
-                      <h3 className="resource-group-title">{issue}</h3>
-                      {items.length === 0 ? (
-                        <p className="resource-group-empty">No resources found for this.</p>
-                      ) : (
-                        <div className="resource-cards">
-                          {items.map((r) => (
-                            <a
-                              key={r.url}
-                              href={r.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="resource-card"
-                            >
-                              <div className="resource-card-title">{r.title}</div>
-                              {r.snippet && <div className="resource-card-snippet">{r.snippet}</div>}
-                              <div className="resource-card-domain">{r.domain}</div>
-                            </a>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                  {!resourcesLoading && resources && resources.map(({ title, detail, resources: items }) => (
+                    <ResourceGroup key={title} title={title} detail={detail} resources={items} />
                   ))}
                 </div>
               )}

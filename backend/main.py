@@ -1946,6 +1946,44 @@ _EXA_CACHE_TTL = 86400          # 24 hours
 _EXA_CACHE_LOCK = threading.Lock()
 
 
+_EXA_STOP_WORDS = {
+    "a","an","the","to","of","in","for","on","with","how","make","your","and",
+    "is","it","are","by","be","at","as","from","that","this","what","you","can",
+    "do","or","my","get","use","using","best","top","guide","tutorial",
+}
+
+
+def _title_keywords(title: str) -> set:
+    words = re.sub(r"[^a-z0-9 ]", "", title.lower()).split()
+    return {w for w in words if w not in _EXA_STOP_WORDS and len(w) > 2}
+
+
+def _dedupe_by_title(results: list) -> list:
+    """Drop results whose title shares >50% keyword overlap with an already-seen title."""
+    seen: list = []
+    out = []
+    for r in results:
+        kws = _title_keywords(r["title"])
+        if not kws:
+            out.append(r)
+            continue
+        if any(len(kws & s) / max(len(kws | s), 1) > 0.5 for s in seen):
+            continue
+        seen.append(kws)
+        out.append(r)
+    return out
+
+
+def _trim_snippet(text: str, max_chars: int = 140) -> str:
+    if not text or len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    boundary = cut.rfind(" ")
+    if boundary > max_chars // 2:
+        cut = cut[:boundary]
+    return cut.rstrip(".,;:") + "…"
+
+
 def _fetch_exa_results(query: str, api_key: str) -> list:
     """Call Exa /search for a single query. Returns a list of resource dicts."""
     from urllib.parse import urlparse
@@ -1953,7 +1991,7 @@ def _fetch_exa_results(query: str, api_key: str) -> list:
 
     payload = json.dumps({
         "query": query,
-        "numResults": 5,
+        "numResults": 3,
         "contents": {"highlights": {"numSentences": 2, "highlightsPerUrl": 1}},
     }).encode("utf-8")
     req = urllib.request.Request(
@@ -1979,14 +2017,24 @@ def _fetch_exa_results(query: str, api_key: str) -> list:
             continue
         title = item.get("title") or url
         highlights = item.get("highlights") or []
-        snippet = highlights[0] if highlights else (item.get("text") or "")[:200]
+        raw_snippet = highlights[0] if highlights else (item.get("text") or "")
+        snippet = _trim_snippet(raw_snippet)
         domain = urlparse(url).netloc.lstrip("www.")
         results.append({"url": url, "title": title, "snippet": snippet, "domain": domain})
-    return results
+
+    return _dedupe_by_title(results)
 
 
 class ResourcesRequest(BaseModel):
     issues: list[str]
+
+
+def _split_issue(issue: str) -> tuple[str, str]:
+    """Split 'Label: full explanation' into (label, explanation)."""
+    if ": " in issue:
+        title, detail = issue.split(": ", 1)
+        return title.strip(), detail.strip()
+    return issue.strip(), ""
 
 
 @app.post("/resources")
@@ -2004,6 +2052,8 @@ async def get_resources(request: Request, body: ResourcesRequest):
     by_issue = []
 
     for issue in issues:
+        title, detail = _split_issue(issue)
+
         # Check in-memory cache first
         with _EXA_CACHE_LOCK:
             entry = _EXA_CACHE.get(issue)
@@ -2017,11 +2067,11 @@ async def get_resources(request: Request, body: ResourcesRequest):
             with _EXA_CACHE_LOCK:
                 _EXA_CACHE[issue] = {"ts": now, "results": raw}
 
-        # Deduplicate across issues
+        # Deduplicate URLs across issues
         deduped = [r for r in raw if r["url"] not in seen_urls]
         seen_urls.update(r["url"] for r in deduped)
 
-        by_issue.append({"issue": issue, "resources": deduped})
+        by_issue.append({"title": title, "detail": detail, "resources": deduped})
 
     return {"by_issue": by_issue}
 
