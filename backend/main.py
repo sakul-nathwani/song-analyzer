@@ -1215,6 +1215,7 @@ def build_comparison_prompt(
     feedback_focus: list[str] | None = None,
     subgenre: str | None = None,
     focus_context: dict | None = None,
+    ref_context: str | None = None,
 ) -> str:
     ref_label = f"Averaged Target ({n_refs} references)" if n_refs > 1 else "Reference Track"
 
@@ -1342,7 +1343,13 @@ Core principles — follow these strictly:
 4. Be descriptive about what sounds ARE present in the WIP. Don't just say "your drop is lacking energy" — say "your drop currently has a supersaw lead and a kick, but the reference has layered bass, a secondary lead, and a percussion loop on top of that."
 5. Suggestions must be possibilities, not corrections. Use language like "you might consider adding...", "one direction could be...", "the reference achieves X by using Y, which could be worth exploring."
 6. Never penalize unique creative choices. If the WIP does something differently from the reference in an interesting way, acknowledge it positively.
-{_focus_directive}{_subgenre_block}{_focus_block}
+{_focus_directive}{_subgenre_block}{_focus_block}{f"""
+---
+## Reference Track Background
+{ref_context}
+Use this context where relevant when describing how the reference achieves its sound. Do not force it in if it doesn't apply.
+---
+""" if ref_context else ""}
 IMPORTANT: Begin your response with a priority scores block, then the full markdown analysis.
 
 <priority_scores>
@@ -1453,6 +1460,7 @@ def _run_analysis(
     reference_section_start: float | None = None,
     reference_section_end: float | None = None,
     reference_section_label: str | None = None,
+    ref_filenames: list[str] | None = None,
 ) -> None:
     """Blocking worker — FastAPI runs sync BackgroundTasks in a thread pool."""
     # Track ALL temp files for cleanup: originals passed in + any sliced versions created here
@@ -1493,7 +1501,7 @@ def _run_analysis(
         if deep_analysis:
             log.info("[job %s] File hashes: %s", job_id[:8], [h[:12] for h in all_hashes])
 
-        max_workers = len(all_paths) * (2 if deep_analysis else 1)
+        max_workers = len(all_paths) * (2 if deep_analysis else 1) + 1
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             analysis_futures = [pool.submit(_analyze_cached, p) for p in all_paths]
             stem_futures = (
@@ -1501,6 +1509,16 @@ def _run_analysis(
                  for p, h in zip(all_paths, all_hashes)]
                 if deep_analysis else []
             )
+
+            # Reference context lookup — runs concurrently, short timeout, fails silently
+            _exa_ctx_future = None
+            _exa_key = os.environ.get("EXA_API_KEY", "")
+            if _exa_key and ref_filenames:
+                _parsed = _extract_artist_title(ref_filenames[0])
+                if _parsed:
+                    _exa_ctx_future = pool.submit(
+                        _fetch_exa_track_context, _parsed[0], _parsed[1], _exa_key
+                    )
 
             # Update stage to "separating" once audio analysis is done but stems are still running
             if stem_futures:
@@ -1613,6 +1631,14 @@ def _run_analysis(
                 "ref_end":   reference_section_end,
             }
 
+        # Collect reference context (already running in background — minimal wait)
+        ref_context: str | None = None
+        if _exa_ctx_future is not None:
+            try:
+                ref_context = _exa_ctx_future.result(timeout=1)
+            except Exception:
+                ref_context = None
+
         prompt = build_comparison_prompt(
             ref_analysis, wip_analysis, n_refs=n_refs,
             ref_stems=ref_stems or None,
@@ -1620,6 +1646,7 @@ def _run_analysis(
             feedback_focus=feedback_focus or None,
             subgenre=subgenre or None,
             focus_context=focus_context,
+            ref_context=ref_context,
         )
         client = anthropic.Anthropic()
         response = client.messages.create(
@@ -1746,6 +1773,7 @@ async def analyze(
                     tmp.write(chunk)
             return path
 
+        ref_filenames = [ref.filename or "" for ref in references]
         ref_paths = [
             await _stream_to_tmp(ref, os.path.splitext(ref.filename or ".wav")[1])
             for ref in references
@@ -1774,6 +1802,7 @@ async def analyze(
         deep_analysis, feedback_focus, clerk_user_id, subgenre,
         focus_mode, wip_section_start, wip_section_end, wip_section_label,
         reference_section_start, reference_section_end, reference_section_label,
+        ref_filenames,
     )
     return {"job_id": job_id}
 
@@ -2023,6 +2052,110 @@ def _fetch_exa_results(query: str, api_key: str) -> list:
         results.append({"url": url, "title": title, "snippet": snippet, "domain": domain})
 
     return _dedupe_by_title(results)
+
+
+# ── Reference track context lookup ─────────────────────────────────────────
+
+_REF_CLEANUP_RE = re.compile(
+    r'\s*[\(\[](official audio|official video|lyrics|lyric video|audio|hd|hq|4k|'
+    r'official|music video|official music video|prod\.?[^\)\]]*|ft\.?[^\)\]]*|'
+    r'feat\.?[^\)\]]*)[\)\]]',
+    re.IGNORECASE,
+)
+
+
+def _extract_artist_title(filename: str) -> tuple[str, str] | None:
+    """
+    Try to extract (artist, title) from a filename like 'Artist - Title.mp3'.
+    Returns None if no confident match.
+    """
+    name = os.path.splitext(filename)[0]
+    name = _REF_CLEANUP_RE.sub("", name).strip()
+    name = name.replace("_", " ").strip()
+    if " - " in name:
+        artist, title = name.split(" - ", 1)
+        artist, title = artist.strip(), title.strip()
+        if len(artist) >= 2 and len(title) >= 2:
+            return artist, title
+    return None
+
+
+def _fetch_exa_track_context(artist: str, title: str, api_key: str) -> str | None:
+    """
+    Query Exa /answer for production background on a reference track.
+    Returns a 2-3 sentence summary, or None if nothing useful is found.
+    Uses the shared _EXA_CACHE with a 'ref_ctx:' prefix key.
+    """
+    import urllib.error
+
+    cache_key = f"ref_ctx:{artist.lower()}|||{title.lower()}"
+    now = time.time()
+    with _EXA_CACHE_LOCK:
+        entry = _EXA_CACHE.get(cache_key)
+        if entry and (now - entry["ts"]) < _EXA_CACHE_TTL:
+            return entry.get("answer")
+
+    query = f'"{title}" by {artist} music production breakdown techniques'
+    payload = json.dumps({"query": query, "text": True}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.exa.ai/answer",
+        data=payload,
+        headers={"Content-Type": "application/json", "x-api-key": api_key},
+        method="POST",
+    )
+    answer: str | None = None
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        raw = (data.get("answer") or "").strip()
+        if len(raw) >= 60:
+            sentences = re.split(r"(?<=[.!?])\s+", raw)
+            answer = " ".join(sentences[:3])
+    except urllib.error.HTTPError as exc:
+        log.warning("[ref-ctx] Exa answer HTTP %s for '%s' by %s", exc.code, title, artist)
+    except Exception as exc:
+        log.warning("[ref-ctx] Exa answer failed for '%s' by %s: %s", title, artist, exc)
+
+    with _EXA_CACHE_LOCK:
+        _EXA_CACHE[cache_key] = {"ts": now, "answer": answer}
+
+    return answer
+
+
+# ── Trending production topics ──────────────────────────────────────────────
+
+_TRENDS_QUERIES = [
+    "new electronic music production techniques 2026",
+    "trending VST plugins EDM producers 2026",
+    "EDM sound design tips mixing trends 2026",
+]
+_TRENDS_CACHE_KEY = "__trends__"
+
+
+@app.get("/trends")
+async def get_trends():
+    exa_key = os.environ.get("EXA_API_KEY", "")
+    if not exa_key:
+        return {"items": []}
+
+    now = time.time()
+    with _EXA_CACHE_LOCK:
+        entry = _EXA_CACHE.get(_TRENDS_CACHE_KEY)
+        if entry and (now - entry["ts"]) < _EXA_CACHE_TTL:
+            return {"items": entry["results"]}
+
+    seen_urls: set = set()
+    combined: list = []
+    for q in _TRENDS_QUERIES:
+        for r in _fetch_exa_results(q, exa_key):
+            if r["url"] not in seen_urls:
+                seen_urls.add(r["url"])
+                combined.append(r)
+
+    with _EXA_CACHE_LOCK:
+        _EXA_CACHE[_TRENDS_CACHE_KEY] = {"ts": now, "results": combined}
+
+    return {"items": combined}
 
 
 class ResourcesRequest(BaseModel):

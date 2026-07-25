@@ -824,6 +824,8 @@ export default function App() {
   const [selectedRefSection, setSelectedRefSection] = useState("auto");
   const [focusModeInfo,      setFocusModeInfo]      = useState(null);
 
+  const [trends, setTrends] = useState(null);   // null=loading, []=empty/error, [...]= loaded
+
   const { isSignedIn, user } = useUser();
 
   const fetchUserUsage = useCallback(async (userId) => {
@@ -857,6 +859,14 @@ export default function App() {
   }, [isAnalyzing]);
 
   useEffect(() => { return () => clearInterval(pollRef.current); }, []);
+
+  // ── Fetch trending production topics once on mount ────────────────────────
+  useEffect(() => {
+    fetch("/trends")
+      .then((r) => r.ok ? r.json() : Promise.reject())
+      .then((d) => setTrends(d.items || []))
+      .catch(() => setTrends([]));
+  }, []);
 
   // ── Lazy-load Exa resources when user opens the Resources tab ────────────
   useEffect(() => {
@@ -1410,6 +1420,27 @@ export default function App() {
           )}
         </section>
 
+
+        {/* Trending topics — shown on idle home state only */}
+        {stage === "idle" && trends && trends.length > 0 && (
+          <section className="trends-section">
+            <div className="trends-header">What's New in Production</div>
+            <div className="trends-list">
+              {trends.map((t) => (
+                <a
+                  key={t.url}
+                  href={t.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="trends-item"
+                >
+                  <span className="trends-item-title">{t.title}</span>
+                  <span className="trends-item-domain">{t.domain}</span>
+                </a>
+              ))}
+            </div>
+          </section>
+        )}
 
         {/* Error */}
         {stage === "error" && (
