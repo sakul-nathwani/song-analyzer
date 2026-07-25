@@ -2169,3 +2169,92 @@ body {
   color: var(--text-muted);
   font-size: 12px;
 }
+
+/* ── Resources tab ── */
+.resources-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding: 4px 0;
+}
+
+.resources-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid rgba(108, 99, 255, 0.2);
+  border-top-color: var(--purple);
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.resource-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.resource-group-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.resource-group-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 4px 0;
+}
+
+.resource-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.resource-card {
+  display: block;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color var(--transition), background var(--transition);
+}
+
+.resource-card:hover {
+  border-color: rgba(108, 99, 255, 0.4);
+  background: var(--bg3);
+}
+
+.resource-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+
+.resource-card-snippet {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin-bottom: 8px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.resource-card-domain {
+  font-size: 11px;
+  color: var(--purple);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}

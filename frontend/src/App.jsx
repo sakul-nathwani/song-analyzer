@@ -749,6 +749,9 @@ export default function App() {
   const [priorityScores, setPriorityScores] = useState([]);
   const [stemAnalyses,   setStemAnalyses]   = useState(null);
   const [stemError,      setStemError]      = useState(null);
+  const [resources,      setResources]      = useState(null);   // null=unfetched, []|[...]=fetched
+  const [resourcesLoading, setResourcesLoading] = useState(false);
+  const [resourcesError,   setResourcesError]   = useState(null);
   const [activeTab,      setActiveTab]      = useState("overview");
   const [deepAnalysis,   setDeepAnalysis]   = useState(false);
   const [feedbackFocus,  setFeedbackFocus]  = useState([]);
@@ -805,6 +808,29 @@ export default function App() {
   }, [isAnalyzing]);
 
   useEffect(() => { return () => clearInterval(pollRef.current); }, []);
+
+  // ── Lazy-load Exa resources when user opens the Resources tab ────────────
+  useEffect(() => {
+    if (activeTab !== "resources" || resources !== null || resourcesLoading) return;
+    if (priorityScores.length === 0) { setResources([]); return; }
+
+    const issues = priorityScores.map((s) => `${s.label}: ${s.summary}`);
+    setResourcesLoading(true);
+    setResourcesError(null);
+
+    fetch("/resources", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ issues }),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Failed to fetch resources (${res.status})`);
+        return res.json();
+      })
+      .then((data) => setResources(data.by_issue || []))
+      .catch((err) => { setResourcesError(err.message); setResources([]); })
+      .finally(() => setResourcesLoading(false));
+  }, [activeTab, resources, resourcesLoading, priorityScores]);
 
   // ── Section detection effect (Focus Mode) ────────────────────────────────
   // Re-runs whenever focus mode toggles or files change
@@ -897,6 +923,9 @@ export default function App() {
     setPriorityScores([]);
     setStemAnalyses(null);
     setStemError(null);
+    setResources(null);
+    setResourcesLoading(false);
+    setResourcesError(null);
     setFocusModeInfo(null);
     setError("");
     setActiveTab("overview");
@@ -912,6 +941,9 @@ export default function App() {
     setPriorityScores([]);
     setStemAnalyses(null);
     setStemError(null);
+    setResources(null);
+    setResourcesLoading(false);
+    setResourcesError(null);
     setFocusModeInfo(null);
     setJobId(null);
     setError("");
@@ -1359,6 +1391,7 @@ export default function App() {
                 { id: "arrangement",   label: "Arrangement",   show: feedbackFocus.includes("Arrangement") || feedbackFocus.includes("Overall") },
                 { id: "sound-design",  label: "Sound Design",  show: feedbackFocus.includes("Sound Design") || feedbackFocus.includes("Overall") },
                 { id: "mixing",        label: "Mixing",        show: feedbackFocus.includes("Mixing") || feedbackFocus.includes("Overall") },
+                { id: "resources",     label: "Resources",     show: priorityScores.length > 0 },
               ].filter(({ show }) => show).map(({ id, label }) => (
                 <button
                   key={id}
@@ -1462,6 +1495,46 @@ export default function App() {
                     </div>
                   </div>
                 </>
+              )}
+
+              {activeTab === "resources" && (
+                <div className="resources-panel">
+                  {resourcesLoading && (
+                    <div className="tab-empty">
+                      <div className="resources-spinner" />
+                      <p>Finding learning resources…</p>
+                    </div>
+                  )}
+                  {resourcesError && !resourcesLoading && (
+                    <div className="tab-empty">
+                      <p>Could not load resources. Please try again.</p>
+                    </div>
+                  )}
+                  {!resourcesLoading && resources && resources.map(({ issue, resources: items }) => (
+                    <div key={issue} className="resource-group">
+                      <h3 className="resource-group-title">{issue}</h3>
+                      {items.length === 0 ? (
+                        <p className="resource-group-empty">No resources found for this.</p>
+                      ) : (
+                        <div className="resource-cards">
+                          {items.map((r) => (
+                            <a
+                              key={r.url}
+                              href={r.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="resource-card"
+                            >
+                              <div className="resource-card-title">{r.title}</div>
+                              {r.snippet && <div className="resource-card-snippet">{r.snippet}</div>}
+                              <div className="resource-card-domain">{r.domain}</div>
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               )}
 
             </div>

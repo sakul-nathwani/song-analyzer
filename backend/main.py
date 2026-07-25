@@ -47,6 +47,7 @@ def _log_env_diagnostics() -> None:
         "REPLICATE_KEY":        os.environ.get("REPLICATE_KEY", ""),
         "SUPABASE_URL":         os.environ.get("SUPABASE_URL", ""),
         "SUPABASE_KEY":         os.environ.get("SUPABASE_KEY", ""),
+        "EXA_API_KEY":          os.environ.get("EXA_API_KEY", ""),
     }
     log.info("=== Environment variable diagnostics ===")
     for name, val in checks.items():
@@ -286,7 +287,84 @@ DROP_MERGE_GAP_SECONDS = 12.0
 DROP_THRESH_FLAT_COV   = 0.20   # CoV below this → track is dynamically flat
 DROP_THRESH_FLAT_MULT  = 1.45   # multiplier used when CoV < DROP_THRESH_FLAT_COV
 DROP_THRESH_NORMAL_MULT = 1.25  # multiplier used otherwise
+
+# Minimum section duration (8-bar rule). BPM-derived; falls back to this floor.
+MIN_SECTION_DURATION_FALLBACK = 12.0   # seconds
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _min_section_duration(bpm: float | None) -> float:
+    """Return the 8-bar minimum in seconds.  Falls back to MIN_SECTION_DURATION_FALLBACK."""
+    if bpm and bpm > 0:
+        eight_bars = (8 * 4 * 60.0) / bpm   # 8 bars × 4 beats/bar × 60 s/min ÷ BPM
+        return max(eight_bars, MIN_SECTION_DURATION_FALLBACK)
+    return MIN_SECTION_DURATION_FALLBACK
+
+
+def _merge_two_segs(a: dict, ea: float, b: dict, eb: float) -> tuple[dict, float]:
+    """Duration-weighted merge of two adjacent segment dicts.  Returns (merged, merged_energy)."""
+    da = a["end"] - a["start"]
+    db = b["end"] - b["start"]
+    td = max(da + db, 1e-9)
+    m  = dict(a)
+    m["start"]      = min(a["start"], b["start"])
+    m["end"]        = max(a["end"],   b["end"])
+    m["avg_energy"] = round((ea * da + eb * db) / td, 6)
+    for key in ("avg_loudness_db", "_onset_rate"):
+        if key in a and key in b:
+            m[key] = round((a[key] * da + b[key] * db) / td, 2)
+    if "_centroid_hz" in a and "_centroid_hz" in b:
+        m["_centroid_hz"] = round((a["_centroid_hz"] * da + b["_centroid_hz"] * db) / td)
+    if "frequency_balance" in a and "frequency_balance" in b:
+        fa, fb = a["frequency_balance"], b["frequency_balance"]
+        m["frequency_balance"] = {
+            k: round((fa.get(k, 0) * da + fb.get(k, 0) * db) / td, 2) for k in fa
+        }
+    return m, m["avg_energy"]
+
+
+def _absorb_short_segments(sections: list, energies: list, min_dur: float):
+    """
+    Iteratively merge any segment shorter than min_dur into its nearest-energy
+    neighbor (by absolute RMS difference).  Restarts the scan after every merge
+    until all segments are >= min_dur or only one remains.
+    Returns (new_sections, new_energies) — inputs are not modified.
+    """
+    secs = list(sections)
+    ens  = list(energies)
+
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(secs)):
+            dur = secs[i]["end"] - secs[i]["start"]
+            if dur >= min_dur:
+                continue
+            if len(secs) <= 1:
+                break
+
+            has_left  = i > 0
+            has_right = i < len(secs) - 1
+
+            if has_left and has_right:
+                merge_with = (i - 1) if abs(ens[i] - ens[i - 1]) <= abs(ens[i] - ens[i + 1]) else (i + 1)
+            elif has_left:
+                merge_with = i - 1
+            else:
+                merge_with = i + 1
+
+            lo, hi = min(i, merge_with), max(i, merge_with)
+            merged_sec, merged_e = _merge_two_segs(secs[lo], ens[lo], secs[hi], ens[hi])
+            log.debug("[sections] absorb %.1f–%.1fs (%.1fs < %.1fs min) into neighbor",
+                      secs[i]["start"], secs[i]["end"], dur, min_dur)
+            secs[lo] = merged_sec
+            ens[lo]  = merged_e
+            del secs[hi]
+            del ens[hi]
+            changed = True
+            break  # restart scan from beginning after every merge
+
+    return secs, ens
 
 
 def _heuristic_label_sections(sections: list, energies: list) -> list:
@@ -371,8 +449,8 @@ def _heuristic_label_sections(sections: list, energies: list) -> list:
                 end_a   = sections[runs[i][-1]]["end"]
                 start_b = sections[runs[i + 1][0]]["start"]
                 if start_b - end_a <= DROP_MERGE_GAP_SECONDS:
-                    # Merge: span all segment indices between the two runs
-                    merged_run = list(range(runs[i][0], runs[i + 1][-1] + 1))
+                    # Merge only the actual drop-candidate indices, not the gap between them
+                    merged_run = runs[i] + runs[i + 1]
                     new_runs.append(merged_run)
                     i += 2
                     merged = True
@@ -403,7 +481,7 @@ def _heuristic_label_sections(sections: list, energies: list) -> list:
     return labels
 
 
-def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
+def detect_sections(y, sr, stft=None, freqs=None, hop_length=512, bpm=None):
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
     mfcc   = librosa.feature.mfcc(y=y, sr=sr, hop_length=hop_length, n_mfcc=13)
     features = np.vstack([
@@ -481,6 +559,14 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
     )
     log.info("[sections] %d segments before labeling: %s", len(sections), seg_summary)
 
+    # ── Pre-labeling: absorb segments shorter than the 8-bar minimum ─────────
+    min_dur = _min_section_duration(bpm)
+    n_before = len(sections)
+    sections, section_energies = _absorb_short_segments(sections, section_energies, min_dur)
+    if len(sections) < n_before:
+        log.info("[sections] absorbed %d short segment(s) (min_dur=%.1fs, bpm=%s) → %d remain",
+                 n_before - len(sections), min_dur, bpm, len(sections))
+
     labels = _heuristic_label_sections(sections, section_energies)
 
     mean_e = float(np.mean(section_energies)) if section_energies else 1.0
@@ -529,6 +615,13 @@ def detect_sections(y, sr, stft=None, freqs=None, hop_length=512):
     dupes = [lbl for lbl, cnt in label_counts.items() if cnt > 1]
     if dupes:
         log.warning("[sections] DUPLICATE LABELS after merge — this is a bug: %s", dupes)
+
+    # Sanity check: warn if any final section is still below the minimum duration
+    for s in sections:
+        dur = s["end"] - s["start"]
+        if dur < min_dur - 0.5:   # 0.5 s tolerance for rounding/boundary effects
+            log.warning("[sections] short section after all merges: %s %.1f–%.1fs (%.1fs < min %.1fs)",
+                        s["label"], s["start"], s["end"], dur, min_dur)
 
     return sections
 
@@ -1844,6 +1937,93 @@ def get_usage(clerk_user_id: str):
     except Exception as exc:
         log.error("[usage] get_usage failed for user %s: %s", clerk_user_id[:8], exc)
         return {"analysis_count": 0, "stem_count": 0, "last_reset_date": today}
+
+
+# ── Exa resource search ────────────────────────────────────────────────────
+
+_EXA_CACHE: dict = {}           # {issue_str: {"ts": float, "results": list}}
+_EXA_CACHE_TTL = 86400          # 24 hours
+_EXA_CACHE_LOCK = threading.Lock()
+
+
+def _fetch_exa_results(query: str, api_key: str) -> list:
+    """Call Exa /search for a single query. Returns a list of resource dicts."""
+    from urllib.parse import urlparse
+    import urllib.error
+
+    payload = json.dumps({
+        "query": query,
+        "numResults": 5,
+        "contents": {"highlights": {"numSentences": 2, "highlightsPerUrl": 1}},
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.exa.ai/search",
+        data=payload,
+        headers={"Content-Type": "application/json", "x-api-key": api_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        log.warning("[resources] Exa HTTP %s for query '%s'", exc.code, query[:60])
+        return []
+    except Exception as exc:
+        log.warning("[resources] Exa request failed for query '%s': %s", query[:60], exc)
+        return []
+
+    results = []
+    for item in data.get("results", []):
+        url = item.get("url", "")
+        if not url:
+            continue
+        title = item.get("title") or url
+        highlights = item.get("highlights") or []
+        snippet = highlights[0] if highlights else (item.get("text") or "")[:200]
+        domain = urlparse(url).netloc.lstrip("www.")
+        results.append({"url": url, "title": title, "snippet": snippet, "domain": domain})
+    return results
+
+
+class ResourcesRequest(BaseModel):
+    issues: list[str]
+
+
+@app.post("/resources")
+@limiter.limit("20/minute")
+@limiter.limit("200/day")
+async def get_resources(request: Request, body: ResourcesRequest):
+    exa_key = os.environ.get("EXA_API_KEY", "")
+    if not exa_key:
+        log.warning("[resources] EXA_API_KEY not set — returning empty resources")
+        return {"by_issue": []}
+
+    issues = [i.strip() for i in body.issues if i.strip()][:10]
+    now = time.time()
+    seen_urls: set = set()
+    by_issue = []
+
+    for issue in issues:
+        # Check in-memory cache first
+        with _EXA_CACHE_LOCK:
+            entry = _EXA_CACHE.get(issue)
+            if entry and (now - entry["ts"]) < _EXA_CACHE_TTL:
+                raw = entry["results"]
+            else:
+                raw = None
+
+        if raw is None:
+            raw = _fetch_exa_results(issue, exa_key)
+            with _EXA_CACHE_LOCK:
+                _EXA_CACHE[issue] = {"ts": now, "results": raw}
+
+        # Deduplicate across issues
+        deduped = [r for r in raw if r["url"] not in seen_urls]
+        seen_urls.update(r["url"] for r in deduped)
+
+        by_issue.append({"issue": issue, "resources": deduped})
+
+    return {"by_issue": by_issue}
 
 
 # ── Static file serving (production) ──────────────────────────────────────
